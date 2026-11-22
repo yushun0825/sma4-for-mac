@@ -1,0 +1,10 @@
+.DS_Store
+build/
+build*/
+.build/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+Packages/Sma4Core/.build/
+Packages/Sma4Core/.swiftpm/
+/Sma4Mac.xcodeproj/
