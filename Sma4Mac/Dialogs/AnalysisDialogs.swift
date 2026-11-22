@@ -10,7 +10,8 @@ enum AnalysisDialogs {
     static func leastSquares(series s0: Series, over window: NSWindow?) -> Series? {
         var pages: [(String, DlgTemplate)] = []
         switch s0.kind {
-        case .polynomialLSQ: pages.append(("当てはめ", .lsqOrder))
+        // 指数・対数・べき乗も「決めた点を必ず通す」が使える(次数は 1 だけ)
+        case .polynomialLSQ, .expLSQ, .logLSQ, .powerLSQ: pages.append(("当てはめ", .lsqOrder))
         case .generalLSQ: pages.append(("関数", .generalFunction))
         default: break
         }
@@ -26,10 +27,11 @@ enum AnalysisDialogs {
         }
         var readFirst: ((inout Series) -> Void)?
         var validateFirst: (() -> Bool)?
-        if s0.kind == .polynomialLSQ {
+        if [.polynomialLSQ, .expLSQ, .logLSQ, .powerLSQ].contains(s0.kind) {
             let p = sheet.page(0)
-            p.setItems(671, (0...9).map(String.init))
-            p.select(671, max(0, min(s0.lsqOrder, 9)))
+            let polynomial = s0.kind == .polynomialLSQ
+            p.setItems(671, polynomial ? (0...9).map(String.init) : ["1"])
+            p.select(671, polynomial ? max(0, min(s0.lsqOrder, 9)) : 0)
             p.setChecked(672, s0.passThroughPoint)
             p.setNumber(673, s0.passX)
             p.setNumber(674, s0.passY)
@@ -37,11 +39,12 @@ enum AnalysisDialogs {
             p.on(672, upd)
             upd()
             p.on(557) {
+                guard polynomial else { return }
                 AppSettings.shared.store(max(p.selectedIndex(671), 0), key: "lsq.dimension")
                 MessageBox.show("次数を既定にしました。")
             }
             readFirst = { s in
-                s.lsqOrder = max(p.selectedIndex(671), 0)
+                if polynomial { s.lsqOrder = max(p.selectedIndex(671), 0) }
                 s.passThroughPoint = p.isChecked(672)
                 s.passX = p.number(673, or: s.passX)
                 s.passY = p.number(674, or: s.passY)
@@ -190,7 +193,7 @@ final class GeneralFunctionPage {
         let initial = SeriesEvaluator.initialParameters(s.generalParameterLine)
         let current = Entry(function: s.generalFunction.isEmpty ? (history.first?.function ?? "a*exp(b*x)") : s.generalFunction,
                             derivatives: s.generalDerivatives,
-                            initial: GeneralFunctionPage.names.map { initial[$0] ?? 1 },
+                            initial: GeneralFunctionPage.names.map { initial[$0] ?? 0 },
                             vary: GeneralFunctionPage.names.map { name in !s.generalFixed.contains(name) },
                             tolerance: s.generalTolerance)
         fill(current)
@@ -211,7 +214,7 @@ final class GeneralFunctionPage {
             var s = Series(name: "")
             self.read(into: &s)
             let e = Entry(function: s.generalFunction, derivatives: s.generalDerivatives,
-                          initial: GeneralFunctionPage.names.map { SeriesEvaluator.initialParameters(s.generalParameterLine)[$0] ?? 1 },
+                          initial: GeneralFunctionPage.names.map { SeriesEvaluator.initialParameters(s.generalParameterLine)[$0] ?? 0 },
                           vary: GeneralFunctionPage.names.map { !s.generalFixed.contains($0) }, tolerance: s.generalTolerance)
             self.history.removeAll { $0.function == e.function }
             self.history.insert(e, at: 0)
@@ -235,20 +238,18 @@ final class GeneralFunctionPage {
         updateEnabled()
     }
 
-    func updateEnabled() {
-        // a〜g の 7 つまで
-        for k in 7..<9 {
-            for id in [811 + k, 787 + k, 778 + k] { p.setEnabled(id, false) }
-        }
-    }
+    /// a〜i の 9 つとも使える
+    func updateEnabled() {}
 
     func read(into s: inout Series) {
         s.generalFunction = p.text(777).trimmingCharacters(in: .whitespaces)
-        s.generalDerivatives = (0..<7).map { p.text(778 + $0).trimmingCharacters(in: .whitespaces) }
-        let values = (0..<7).map { p.number(787 + $0, or: 1) }
-        s.generalParameterLine = "7 " + values.map { String(format: "%.10g", $0) }.joined(separator: " ") + " 0"
-        s.generalFixed = Set((0..<7).filter { !p.isChecked(811 + $0) }.map { GeneralFunctionPage.names[$0] })
-        s.generalTolerance = max(p.number(796, or: 0.001), 0)
+        s.generalDerivatives = (0..<9).map { p.text(778 + $0).trimmingCharacters(in: .whitespaces) }
+        let values = (0..<9).map { p.number(787 + $0, or: 0) }
+        let tolerance = max(p.number(796, or: 0.001), 0)
+        // SMP の形: "9 許容誤差 a b c d e f g h i"
+        s.generalParameterLine = "9 " + ([tolerance] + values).map { String(format: "%e", $0) }.joined(separator: " ")
+        s.generalFixed = Set((0..<9).filter { !p.isChecked(811 + $0) }.map { GeneralFunctionPage.names[$0] })
+        s.generalTolerance = tolerance
     }
 
     func validate() -> Bool {

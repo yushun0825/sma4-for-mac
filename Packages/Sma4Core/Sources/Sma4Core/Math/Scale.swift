@@ -3,8 +3,23 @@ import Foundation
 /// 軸の値と位置(0〜1)の変換と目盛りの計算
 public struct AxisScale: Sendable {
     public let spec: AxisSpec
+    /// 対数の目盛の 10^0・10^1 を 1・10 と書く(グラフの設定)
+    public var plainLogDecades: Bool
+    /// 目盛変換の式で使う定数 a〜i
+    public var constants: [Double]
+    let transform: Expression?
 
-    public init(_ spec: AxisSpec) { self.spec = spec }
+    public init(_ spec: AxisSpec, plainLogDecades: Bool = false, constants: [Double] = []) {
+        self.spec = spec
+        self.plainLogDecades = plainLogDecades
+        self.constants = constants
+        let body = spec.transformExpression.trimmingCharacters(in: .whitespaces)
+        transform = spec.transformEnabled && !body.isEmpty ? (try? Expression(body)) : nil
+        transformBroken = spec.transformEnabled && !body.isEmpty && transform == nil
+    }
+
+    /// 目盛変換の式が読めない(数字の代わりに計算できない値の印を書く)
+    let transformBroken: Bool
 
     var type: ScaleType { spec.scaleType }
 
@@ -127,7 +142,7 @@ public struct AxisScale: Sendable {
             for m in [1.0, 2.0, 5.0] {
                 let v = m * Foundation.pow(10, Double(e))
                 guard let f = fraction(v), f >= -1e-9, f <= 1 + 1e-9 else { continue }
-                let label = labelFor(index: labelIndex) ? format(v, step: v / 10) : nil
+                let label = labelFor(index: labelIndex) ? format(v, step: v / 10, getta: false) : nil
                 labelIndex += 1
                 out.append(Tick(value: v, fraction: f, isMajor: true, label: label))
             }
@@ -163,7 +178,14 @@ public struct AxisScale: Sendable {
                     var label: String?
                     if labelFor(index: labelIndex) {
                         if type == .logExponent {
-                            label = m == 1 ? "10^\(e)@" : nil
+                            // 指数で書く軸は目盛変換を使わない
+                            if m == 1 {
+                                if plainLogDecades && e == 0 { label = "1" }
+                                else if plainLogDecades && e == 1 { label = "10" }
+                                else { label = "10^\(e)@" }
+                            }
+                        } else if transform != nil || transformBroken {
+                            label = AxisScale.formatNumber(transformed(v), spec)
                         } else {
                             label = formatLog(v, exponent: e)
                         }
@@ -178,32 +200,56 @@ public struct AxisScale: Sendable {
         return out
     }
 
-    /// 目盛り数字の書き方(Linear)
-    public func format(_ raw: Double, step: Double) -> String {
-        let getta = spec.gettaOrder != 0 && spec.gettaOrder != 1 ? spec.gettaOrder : 1
-        let v = raw / getta
-        let s = Swift.abs(step / getta)
-        var decimals = 0
-        if s > 0 && s.isFinite {
-            var t = s
-            while decimals < 10 {
-                let r = (t * 1).rounded()
-                if Swift.abs(t - r) < 1e-6 * Swift.max(1, Swift.abs(t)) { break }
-                t *= 10
-                decimals += 1
-            }
+    /// 目盛の数字にかける倍率(×10^n)の n。From・To の大きいほうの絶対値が 10^整数部の桁数 以上なら
+    /// その桁(1e6 → 6、123460 → 5)、そうでなく目盛の間隔が 10^-小数部の桁数 より小さければ間隔の桁(2e-6 → -6)。
+    /// ファイルにあるゲタのオーダーの値は使わない。等間隔と逆数(逆数で書く)の軸だけ
+    public var gettaExponent: Int? {
+        guard type == .linear || type == .inverseReciprocal else { return nil }
+        let maxAbs = Swift.max(Swift.abs(spec.from), Swift.abs(spec.to))
+        guard maxAbs.isFinite, maxAbs > 0 else { return nil }
+        if maxAbs >= Foundation.pow(10, Double(spec.integerDigits)) {
+            return Int(Foundation.floor(Foundation.log10(maxAbs) + 1e-12))
         }
-        if spec.decimalDigits >= 0 && spec.decimalDigits < 5 { decimals = spec.decimalDigits }
-        var text: String
-        if Swift.abs(v) < 1e-12 * Swift.max(1, s) {
-            text = spec.zeroAsInteger ? "0" : String(format: "%.\(decimals)f", 0.0)
-        } else if Swift.abs(v) >= 1e15 {
-            text = String(format: "%g", v)
-        } else {
-            text = String(format: "%.\(decimals)f", v)
+        let inc = Swift.abs(spec.increment)
+        if inc > 0, inc.isFinite, inc < Foundation.pow(10, -Double(spec.decimalDigits)) {
+            return Int(Foundation.floor(Foundation.log10(inc) + 1e-12))
         }
-        if text.hasPrefix("-"), Double(text) == 0 { text.removeFirst() }
-        if spec.plusSign, v > 0 { text = "+" + text }
+        return nil
+    }
+
+    /// 目盛変換の式で計算し直す(計算できなければ NaN)
+    func transformed(_ v: Double) -> Double {
+        guard let t = transform else { return .nan }
+        let r = (try? t.evaluateScalar(x: v, y: 0, constants: ExprContext.constantsDictionary(constants))) ?? .nan
+        return r.isFinite ? r : .nan
+    }
+
+    /// 目盛り数字(等間隔・逆数)。倍率(ゲタ)で割り、目盛変換があれば式で計算し直してから書く
+    public func format(_ raw: Double, step: Double, getta: Bool = true) -> String {
+        var v = raw
+        if getta, let e = gettaExponent { v /= Foundation.pow(10, Double(e)) }
+        if transform != nil || transformBroken { v = transformed(v) }
+        return AxisScale.formatNumber(v, spec)
+    }
+
+    /// 計算できない値の印(1e301 を "%.39e" で書き、17 桁より先を 0 で埋めた形)
+    public static let uncomputableLabel = "1." + String(repeating: "0", count: 39) + "e+301"
+
+    /// 数字の書き方: 小数部の桁数で書き、「0 は消さない」でなければ末尾の 0 と小数点を消す。
+    /// 0 は「0.0 は 0」なら 0。「+ を付ける」なら正の数に +。計算できない値は 1e301 の印
+    public static func formatNumber(_ value: Double, _ spec: AxisSpec) -> String {
+        guard value.isFinite, Swift.abs(value) < 1e300 else { return AxisScale.uncomputableLabel }
+        let d = Swift.min(Swift.max(spec.decimalDigits, 0), 15)
+        var text = String(format: "%.\(d)f", value)
+        if text.hasPrefix("-"), (Double(text) ?? 1) == 0 { text.removeFirst() }
+        let isZero = (Double(text) ?? 1) == 0
+        if isZero && spec.zeroAsInteger {
+            text = "0"
+        } else if !spec.zeroPadding, text.contains(".") {
+            while text.hasSuffix("0") { text.removeLast() }
+            if text.hasSuffix(".") { text.removeLast() }
+        }
+        if spec.plusSign, !isZero, value > 0 { text = "+" + text }
         return text
     }
 

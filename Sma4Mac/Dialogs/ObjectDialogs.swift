@@ -43,7 +43,7 @@ enum ObjectDialogs {
         p.setupColorPopup(790, color: t0.color)
         p.setItems(744, specialCharacters.map(\.0))
         p.setText(744, "")
-        let justify = Int(t0.positionTail.first ?? "0") ?? 0
+        let justify = t0.alignment
         for id in 908...910 { p.setChecked(id, id - 908 == justify) }
         p.on(744) {
             let i = p.selectedIndex(744)
@@ -95,10 +95,7 @@ enum ObjectDialogs {
             t.symbolFont.pointSize = max(size, 1)
             t.angle = angle
             t.color = p.popupColor(790, fallback: base.color)
-            var tail = base.positionTail
-            if tail.isEmpty { tail = ["0"] }
-            tail[0] = String((908...910).first { p.isChecked($0) }.map { $0 - 908 } ?? 0)
-            t.positionTail = tail
+            t.alignment = (908...910).first { p.isChecked($0) }.map { $0 - 908 } ?? 0
             return t
         }
 
@@ -254,8 +251,7 @@ enum ObjectDialogs {
         p.setMM(751, s0.width)
         p.setMM(787, s0.size)
         p.setMM(788, s0.aspect)
-        p.setChecked(912, false)
-        p.setEnabled(912, false)
+        p.setChecked(912, s0.absolutePosition)
         p.setEnabled(7, !isNew)
         dlg.buttons[797] = { true }
         dlg.buttons[718] = {
@@ -274,6 +270,7 @@ enum ObjectDialogs {
             s.width = max(p.mm(751, or: base.width), 0)
             s.size = max(p.mm(787, or: base.size), 0)
             s.aspect = max(p.mm(788, or: base.aspect), 0)
+            s.absolutePosition = p.isChecked(912)
             return s
         }
         switch dlg.run(over: window) {
@@ -354,10 +351,14 @@ enum ObjectDialogs {
         p.setText(741, pic0.path)
         p.setNumber(754, pic0.shape.x1)
         p.setNumber(755, pic0.shape.y1)
-        p.setNumber(787, pic0.shape.x2 - pic0.shape.x1)
-        p.setNumber(788, pic0.shape.y2 - pic0.shape.y1)
-        p.setChecked(912, false)
-        p.setEnabled(912, false)
+        if let size = pic0.displaySize {
+            p.setNumber(787, size.width / 100)
+            p.setNumber(788, size.height / 100)
+        } else {
+            p.setNumber(787, pic0.shape.x2 - pic0.shape.x1)
+            p.setNumber(788, pic0.shape.y2 - pic0.shape.y1)
+        }
+        p.setChecked(912, pic0.shape.absolutePosition)
         p.setEnabled(7, !isNew)
         func updateSize() {
             guard let size = imageSize(p.text(741)), size.width > 0 else {
@@ -396,7 +397,10 @@ enum ObjectDialogs {
             pic.shape.y1 = p.number(755, or: pic0.shape.y1)
             pic.shape.x2 = pic.shape.x1 + w
             pic.shape.y2 = pic.shape.y1 + h
-            if let size = imageSize(pic.path) { pic.info = [0, 0, Int(size.width), Int(size.height)] }
+            pic.shape.absolutePosition = p.isChecked(912)
+            if let size = imageSize(pic.path) {
+                pic.info = PictureObject.newInfo(pixelWidth: Int(size.width), pixelHeight: Int(size.height), widthMM: w)
+            }
             return .ok(pic)
         case 7: return .delete
         default: return nil

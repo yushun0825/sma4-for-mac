@@ -32,14 +32,15 @@ public enum PlotType {
         return n
     }
 
-    static let dotColorFilled: Set<Int> = [2, 4, 6, 8, 10, 13, 19, 20, 21, 22, 23, 26, 27, 33, 34]
+    static let dotColorFilled: Set<Int> = [2, 4, 6, 8, 10, 13, 26, 27, 33, 34]
 
     /// 中をドットの色で塗る値か(それ以外は中塗色で塗る)
     public static func fillsWithDotColor(_ code: Int) -> Bool { dotColorFilled.contains(code) }
 
     /// 何かを描く値か(0, 29〜32, 35〜37 などは何も描かない)
     public static func drawsMark(_ code: Int) -> Bool {
-        (1...28).contains(code) || code == 33 || code == 34 || (38...52).contains(code)
+        // 27(矩形)・28(対角線)は誤差の列が無いと何も描かない(誤差の列があるときの形は未確認)
+        (1...26).contains(code) || code == 33 || code == 34 || (38...52).contains(code)
     }
 }
 
@@ -67,19 +68,31 @@ public enum DotBrush {
     }
 }
 
-/// Data Mask([MASKS] の 1 行)。系列 1 つの、変換後の値がこの範囲に入る点を欠損と同じに扱う。
+/// Data Mask([MASKS] の 1 行 "対象 xMin xMax yMin yMax")。変換後の値がこの範囲に入る点を欠損と同じに扱う。
+/// 対象は 0 ならすべての系列(マスクをかけるデータを選ぶ窓の All)、k なら k 番目の系列(1 から数える)。
 public struct DataMask: Hashable, Sendable {
-    /// 0 始まりの系列の番号
-    public var seriesIndex: Int
+    /// すべての系列に効くマスクの対象の番号
+    public static let allSeries = 0
+
+    /// 0 = すべての系列、k = k 番目の系列(1 から数える)
+    public var target: Int
     public var xMin: Double
     public var xMax: Double
     public var yMin: Double
     public var yMax: Double
 
-    public init(seriesIndex: Int, xMin: Double, xMax: Double, yMin: Double, yMax: Double) {
-        self.seriesIndex = seriesIndex
+    public init(target: Int, xMin: Double, xMax: Double, yMin: Double, yMax: Double) {
+        self.target = target
         self.xMin = xMin; self.xMax = xMax; self.yMin = yMin; self.yMax = yMax
     }
+
+    /// 0 始まりの系列の番号 index に効くか
+    public func applies(toSeries index: Int) -> Bool {
+        target == DataMask.allSeries || target == index + 1
+    }
+
+    /// 1 つの系列だけに効くマスクなら、その系列の 0 始まりの番号
+    public var seriesIndex: Int? { target > 0 ? target - 1 : nil }
 
     /// 点が範囲に入るか(境界を含む。最小と最大が逆でもよい)
     public func contains(x: Double, y: Double) -> Bool {

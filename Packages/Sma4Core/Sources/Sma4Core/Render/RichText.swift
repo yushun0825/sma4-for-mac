@@ -21,7 +21,7 @@ public enum RichToken: Equatable, Sendable {
     case charCode(Int)    // %Q???
     case color(SMPColor)  // %K??????
     case font(String)     // %J名前%J
-    case sampleLength(Int)  // %H???(0.1 mm)
+    case sampleLength(Int)  // %H???(%E・%F の見本の幅。100 で文字の高さの 2 倍)
     case seriesName(Int, lower: Bool)  // %??N
     case seriesMarker(Int)              // %??E
     case seriesCurve(Int)               // %??F

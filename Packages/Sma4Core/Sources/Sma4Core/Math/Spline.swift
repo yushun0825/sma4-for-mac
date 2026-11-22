@@ -70,20 +70,19 @@ public enum Spline {
         guard n >= 2 else { return natural(t, y) }
         var h = [Double](repeating: 0, count: n)
         for i in 0..<n { h[i] = t[i + 1] - t[i] }
-        // 2 階微分 M_i(i = 0..n-1、M_n = M_0)の巡回三重対角
-        var A = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
-        var r = [Double](repeating: 0, count: n)
+        // 2 階微分 M_i(i = 0..n-1、M_n = M_0)の巡回三重対角: h_{i-1} M_{i-1} + 2(h_{i-1} + h_i) M_i + h_i M_{i+1} = r_i
+        var lower = [Double](repeating: 0, count: n), diag = lower, upper = lower, r = lower
         for i in 0..<n {
             let hm = h[(i - 1 + n) % n], hp = h[i]
-            A[i][(i - 1 + n) % n] += hm
-            A[i][i] += 2 * (hm + hp)
-            A[i][(i + 1) % n] += hp
+            lower[i] = hm
+            diag[i] = 2 * (hm + hp)
+            upper[i] = hp
             let yp = y[(i + 1) % n == 0 ? n : i + 1]
             let ym = y[(i - 1 + n) % n]
             let yi = y[i]
             r[i] = 6 * ((yp - yi) / hp - (yi - ym) / hm)
         }
-        guard let M = Fitting.solve(A, r) else { return natural(t, y) }
+        guard let M = solveCyclic(lower: lower, diag: diag, upper: upper, r) else { return natural(t, y) }
         var a = [Double](repeating: 0, count: n + 1), b = a, c = a, d = a
         for i in 0..<n {
             let m0 = M[i], m1 = M[(i + 1) % n]
@@ -95,6 +94,53 @@ public enum Spline {
         }
         a[n] = y[n]
         return Coefficients(x: t, a: a, b: b, c: c, d: d)
+    }
+
+    /// 三重対角 A x = r(a[i] = A[i][i-1]、b[i] = A[i][i]、c[i] = A[i][i+1])をトーマス法で解く(対角優位を前提にピボットなし)
+    static func solveTridiagonal(_ a: [Double], _ b: [Double], _ c: [Double], _ r: [Double]) -> [Double]? {
+        let n = b.count
+        guard n >= 1 else { return [] }
+        var cp = [Double](repeating: 0, count: n), dp = cp
+        guard b[0] != 0 else { return nil }
+        cp[0] = n > 1 ? c[0] / b[0] : 0
+        dp[0] = r[0] / b[0]
+        for i in 1..<n {
+            let den = b[i] - a[i] * cp[i - 1]
+            guard den != 0 else { return nil }
+            cp[i] = i < n - 1 ? c[i] / den : 0
+            dp[i] = (r[i] - a[i] * dp[i - 1]) / den
+        }
+        var x = dp
+        for i in stride(from: n - 2, through: 0, by: -1) { x[i] = dp[i] - cp[i] * x[i + 1] }
+        return x.allSatisfy(\.isFinite) ? x : nil
+    }
+
+    /// 巡回三重対角(三重対角に、角の A[0][n-1] = lower[0] と A[n-1][0] = upper[n-1] が加わる)を O(n) で解く。
+    /// Sherman–Morrison で三重対角 2 つに直す。n が 2 以下なら角が対角の隣と重なるので、行列を作って解く
+    static func solveCyclic(lower: [Double], diag: [Double], upper: [Double], _ r: [Double]) -> [Double]? {
+        let n = diag.count
+        if n <= 2 {
+            var A = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
+            for i in 0..<n {
+                A[i][i] += diag[i]
+                A[i][(i - 1 + n) % n] += lower[i]
+                A[i][(i + 1) % n] += upper[i]
+            }
+            return Fitting.solve(A, r)
+        }
+        let topRight = lower[0], bottomLeft = upper[n - 1]
+        let gamma = -diag[0]
+        var b = diag
+        b[0] -= gamma
+        b[n - 1] -= bottomLeft * topRight / gamma
+        guard let x = solveTridiagonal(lower, b, upper, r) else { return nil }
+        var u = [Double](repeating: 0, count: n)
+        u[0] = gamma
+        u[n - 1] = bottomLeft
+        guard let z = solveTridiagonal(lower, b, upper, u) else { return nil }
+        let fact = (x[0] + topRight * x[n - 1] / gamma) / (1 + z[0] + topRight * z[n - 1] / gamma)
+        let out = zip(x, z).map { $0 - fact * $1 }
+        return out.allSatisfy(\.isFinite) ? out : nil
     }
 
     /// 点列を受け取り、描くための点列を返す

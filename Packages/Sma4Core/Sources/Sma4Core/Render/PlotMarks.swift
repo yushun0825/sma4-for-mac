@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-// プロットの種類の描き方(38〜52 の形は推定)
+// プロットの種類の描き方(0〜26・33・34・38〜52)
 extension GraphRenderer {
     /// 中の塗り方
     enum MarkFill: Equatable {
@@ -27,7 +27,7 @@ extension GraphRenderer {
     struct MarkGeometry {
         var body: CGPath?
         var lines: CGPath?
-        /// body の左半分をドットの色で塗る(44〜48)
+        /// body の右半分をドットの色で塗る(19〜23)
         var halfFilled = false
     }
 
@@ -61,7 +61,7 @@ extension GraphRenderer {
             })
         }
         func star() -> CGPath {
-            let outer = 1.3 * r, inner = outer * 0.382
+            let outer = 1.0 * r, inner = outer * 0.382
             return polygon((0..<10).map { k in
                 let a = (-90 + 36 * Double(k)) * Double.pi / 180
                 let R = k % 2 == 0 ? outer : inner
@@ -69,18 +69,35 @@ extension GraphRenderer {
             })
         }
         let d = r / CGFloat(2.0.squareRoot())
+        /// 中心のまわりに半分の大きさにした形
+        func inner(_ path: CGPath) -> CGPath {
+            var t = CGAffineTransform(translationX: p.x, y: p.y).scaledBy(x: 0.5, y: 0.5).translatedBy(x: -p.x, y: -p.y)
+            return path.copy(using: &t) ?? path
+        }
         let slash = (pt(-r, r), pt(r, -r))
         let backslash = (pt(-r, -r), pt(r, r))
 
         switch code {
-        case 1, 2, 14, 19: return MarkGeometry(body: circle())
-        case 3, 4, 15, 20: return MarkGeometry(body: triangleUp())
-        case 5, 6, 16, 21, 27: return MarkGeometry(body: square())
-        case 7, 8, 17, 22: return MarkGeometry(body: triangleDown())
-        case 9, 10, 18, 23: return MarkGeometry(body: diamond())
+        case 1, 2: return MarkGeometry(body: circle())
+        case 3, 4: return MarkGeometry(body: triangleUp())
+        case 5, 6, 27: return MarkGeometry(body: square())
+        case 7, 8: return MarkGeometry(body: triangleDown())
+        case 9, 10: return MarkGeometry(body: diamond())
+        // 14〜18: 同じ形を半分の大きさで中に重ねる
+        case 14: return MarkGeometry(body: circle(), lines: inner(circle()))
+        case 15: return MarkGeometry(body: triangleUp(), lines: inner(triangleUp()))
+        case 16: return MarkGeometry(body: square(), lines: inner(square()))
+        case 17: return MarkGeometry(body: triangleDown(), lines: inner(triangleDown()))
+        case 18: return MarkGeometry(body: diamond(), lines: inner(diamond()))
+        // 19〜23: 右半分をドットの色で塗る
+        case 19: return MarkGeometry(body: circle(), halfFilled: true)
+        case 20: return MarkGeometry(body: triangleUp(), halfFilled: true)
+        case 21: return MarkGeometry(body: square(), halfFilled: true)
+        case 22: return MarkGeometry(body: triangleDown(), halfFilled: true)
+        case 23: return MarkGeometry(body: diamond(), halfFilled: true)
         case 11: return MarkGeometry(lines: segments([(pt(0, -r), pt(0, r)), (pt(-r, 0), pt(r, 0))]))
         case 12: return MarkGeometry(lines: segments([backslash, slash]))
-        case 24, 28: return MarkGeometry(lines: segments([slash]))
+        case 24: return MarkGeometry(lines: segments([slash]))
         case 25: return MarkGeometry(lines: segments([backslash]))
         case 13: return MarkGeometry(body: CGPath(rect: CGRect(x: p.x - r / 3, y: p.y - r, width: 2 * r / 3, height: 2 * r), transform: nil))
         case 26: return MarkGeometry(body: CGPath(rect: CGRect(x: p.x - r, y: p.y - r / 3, width: 2 * r, height: 2 * r / 3), transform: nil))
@@ -88,19 +105,21 @@ extension GraphRenderer {
         case 34: return MarkGeometry(lines: polygon([pt(-r, 2 * r), pt(-r, 0), pt(r, 0), pt(r, -2 * r)], closed: false))
         case 38: return MarkGeometry(body: regular(6, radius: 1.1 * r, startDegrees: -90))
         case 39: return MarkGeometry(body: regular(5, radius: 1.15 * r, startDegrees: -90))
-        case 40: return MarkGeometry(body: regular(5, radius: 1.15 * r, startDegrees: 90))
+        case 40: return MarkGeometry(body: regular(5, radius: 0.95 * r, startDegrees: -90))
         case 41: return MarkGeometry(body: star())
         case 42: return MarkGeometry(body: circle(), lines: segments([(pt(0, -r), pt(0, r)), (pt(-r, 0), pt(r, 0))]))
         case 43: return MarkGeometry(body: circle(), lines: segments([(pt(-d, -d), pt(d, d)), (pt(-d, d), pt(d, -d))]))
-        case 44: return MarkGeometry(body: circle(), halfFilled: true)
-        case 45: return MarkGeometry(body: triangleUp(), halfFilled: true)
-        case 46: return MarkGeometry(body: square(), halfFilled: true)
-        case 47: return MarkGeometry(body: triangleDown(), halfFilled: true)
-        case 48: return MarkGeometry(body: diamond(), halfFilled: true)
-        case 49: return MarkGeometry(body: circle(), lines: segments([(pt(0, -r), pt(0, r))]))
-        case 50: return MarkGeometry(body: circle(), lines: segments([(pt(-r, 0), pt(r, 0))]))
-        case 51: return MarkGeometry(body: circle(), lines: segments([(pt(-d, d), pt(d, -d))]))
-        case 52: return MarkGeometry(body: circle(), lines: segments([(pt(-d, -d), pt(d, d))]))
+        // 44〜48: 形の上から下へ縦の線
+        case 44: return MarkGeometry(body: circle(), lines: segments([(pt(0, -r), pt(0, r))]))
+        case 45: return MarkGeometry(body: triangleUp(), lines: segments([(pt(0, -1.24 * r), pt(0, 0.62 * r))]))
+        case 46: return MarkGeometry(body: square(), lines: segments([(pt(0, -r), pt(0, r))]))
+        case 47: return MarkGeometry(body: triangleDown(), lines: segments([(pt(0, -0.62 * r), pt(0, 1.24 * r))]))
+        case 48: return MarkGeometry(body: diamond(), lines: segments([(pt(0, -10 * r / 7), pt(0, 10 * r / 7))]))
+        // 49〜52: 丸と、右・下・左・上へ出る線
+        case 49: return MarkGeometry(body: circle(), lines: segments([(pt(r, 0), pt(2 * r, 0))]))
+        case 50: return MarkGeometry(body: circle(), lines: segments([(pt(0, r), pt(0, 2 * r))]))
+        case 51: return MarkGeometry(body: circle(), lines: segments([(pt(-r, 0), pt(-2 * r, 0))]))
+        case 52: return MarkGeometry(body: circle(), lines: segments([(pt(0, -r), pt(0, -2 * r))]))
         default: return nil
         }
     }
@@ -133,7 +152,7 @@ extension GraphRenderer {
             if geo.halfFilled {
                 let b = body.boundingBox
                 ctx.saveGState()
-                ctx.clip(to: CGRect(x: b.minX - b.width, y: b.minY - b.height, width: center.x - (b.minX - b.width), height: 3 * b.height))
+                ctx.clip(to: CGRect(x: center.x, y: b.minY - b.height, width: b.maxX + b.width - center.x, height: 3 * b.height))
                 ctx.setFillColor(cgColor(dotColor))
                 ctx.addPath(body)
                 ctx.fillPath()
@@ -157,6 +176,11 @@ extension GraphRenderer {
         case .none:
             break
         case .color(let c):
+            ctx.setFillColor(cgColor(c))
+            ctx.addPath(path)
+            ctx.fillPath()
+        case .hatch(let c, let h) where h >= 6:
+            // 6 以上は塗りつぶし
             ctx.setFillColor(cgColor(c))
             ctx.addPath(path)
             ctx.fillPath()
@@ -220,7 +244,7 @@ extension GraphRenderer {
         guard PlotType.drawsMark(code) else { return }
         let h = fr.graph.horizontalAxisIndex(for: s), v = fr.graph.verticalAxisIndex(for: s)
         switch code {
-        case 13, 26, 27, 33, 34:
+        case 13, 26, 33, 34:
             ctx.saveGState()
             if fr.graph.frameType != .axes || options.clipToFrame { ctx.clip(to: fr.rect.insetBy(dx: -1, dy: -1)) }
             if code == 33 || code == 34 { drawSteps(s, d, fr, h, v, ctx) } else { drawBars(s, d, fr, h, v, ctx) }
@@ -316,25 +340,15 @@ extension GraphRenderer {
         ctx.restoreGState()
     }
 
-    /// 34 横階段(各点の y の横線を x の中点で区切り、中点で縦につなぐ)・33 縦階段(その縦横を入れ替えたもの)
+    /// 34 横階段(点から次の点の x まで横、そこから次の点の y まで縦)・33 縦階段(先に縦、次に横)。点を通る
     func drawSteps(_ s: Series, _ d: SeriesPlotData, _ fr: Frame, _ h: Int, _ v: Int, _ ctx: CGContext) {
-        let size = CGFloat(Swift.max(s.dotSize, 0))
         let path = CGMutablePath()
-        for run in GraphRenderer.pointRuns(d, fr, h, v) {
-            if s.dotType == 34 {
-                let spans = GraphRenderer.midpointSpans(run.map(\.x), fallback: size)
-                for (i, (p, span)) in zip(run, spans).enumerated() {
-                    let a = CGPoint(x: span.lo, y: p.y), b = CGPoint(x: span.hi, y: p.y)
-                    if i == 0 { path.move(to: a) } else { path.addLine(to: a) }
-                    path.addLine(to: b)
-                }
-            } else {
-                let spans = GraphRenderer.midpointSpans(run.map(\.y), fallback: size)
-                for (i, (p, span)) in zip(run, spans).enumerated() {
-                    let a = CGPoint(x: p.x, y: span.lo), b = CGPoint(x: p.x, y: span.hi)
-                    if i == 0 { path.move(to: a) } else { path.addLine(to: a) }
-                    path.addLine(to: b)
-                }
+        for run in GraphRenderer.pointRuns(d, fr, h, v) where run.count >= 2 {
+            path.move(to: run[0])
+            for i in 1..<run.count {
+                let a = run[i - 1], b = run[i]
+                path.addLine(to: s.dotType == 34 ? CGPoint(x: b.x, y: a.y) : CGPoint(x: a.x, y: b.y))
+                path.addLine(to: b)
             }
         }
         guard !path.isEmpty else { return }

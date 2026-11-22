@@ -229,7 +229,7 @@ enum SelfTestRunner {
 
         // 15. Data Mask: 範囲の中の点が消える
         let before = doc.plotData()[0][0].finitePoints.count
-        step { doc.update(graph: 0, "Data Mask") { $0.masks = [DataMask(seriesIndex: 0, xMin: 0, xMax: 150, yMin: -1e9, yMax: 1e9)] } }
+        step { doc.update(graph: 0, "Data Mask") { $0.masks = [DataMask(target: 1, xMin: 0, xMax: 150, yMin: -1e9, yMax: 1e9)] } }
         let after = doc.plotData()[0][0].finitePoints.count
         check(after < before, "Data Mask の範囲の点を除く", "\(before)→\(after)")
         step { doc.update(graph: 0, "Data Mask の削除") { $0.masks = [] } }

@@ -49,36 +49,28 @@ public struct FitResult: Sendable, Equatable {
         return xs.map(evaluate)
     }
 
-    /// 結果のダイアログやクリップボードに出す文
+    /// 結果のダイアログやクリップボードに出す文: 1 行目は「*」と式、係数を "%10.8e" で 1 行ずつ、
+    /// 残差の二乗平均の平方根 √(χ²/n)(指数・べき乗は ln y の上)、"|r|=" 相関係数
     public var summary: String {
-        func f(_ v: Double) -> String { Fitting.format(v) }
+        func e(_ v: Double) -> String { String(format: "%10.8e", v) }
         var lines: [String] = []
         switch model {
         case .polynomial(let coeffs, _, _, _):
-            lines.append("f(x) = Σ a_n x^n (n = 0〜\(coeffs.count - 1))")
-            for (i, c) in coeffs.enumerated() { lines.append("a\(i) = \(f(c))") }
+            lines.append("*y=Σan x^n")
+            for (i, c) in coeffs.enumerated() { lines.append("a\(i)=" + e(c)) }
         case .exponential(let a0, let a1):
-            lines.append("ln(y) = a0 + a1 x  (y = A exp(a1 x), A = exp(a0))")
-            lines.append("a0 = \(f(a0))")
-            lines.append("a1 = \(f(a1))")
-            lines.append("A = \(f(Foundation.exp(a0)))")
+            lines += ["*ln y=a + b x", "a=" + e(a0), "b=" + e(a1)]
         case .logarithmic(let a0, let a1):
-            lines.append("y = a0 + a1 ln(x)")
-            lines.append("a0 = \(f(a0))")
-            lines.append("a1 = \(f(a1))")
+            lines += ["*y=a + b ln x", "a=" + e(a0), "b=" + e(a1)]
         case .power(let a0, let a1):
-            lines.append("ln(y) = a0 + a1 ln(x)  (y = A x^a1, A = exp(a0))")
-            lines.append("a0 = \(f(a0))")
-            lines.append("a1 = \(f(a1))")
-            lines.append("A = \(f(Foundation.exp(a0)))")
+            lines += ["*ln y=a + b ln x", "a=" + e(a0), "b=" + e(a1)]
         case .general(let src, let params):
-            lines.append("f(x) = \(src)")
-            let used = (try? Expression(src).referencedVariables()) ?? []
-            for k in Fitting.parameterNames where used.contains(k) { lines.append("\(k) = \(f(params[k] ?? 0))") }
-            lines.append("chi^2 = \(f(chiSquare))")
+            lines.append("*" + src)
+            let used = (try? Expression(Expression.body(src, assigning: "y")).referencedVariables()) ?? []
+            for k in Fitting.parameterNames where used.contains(k) { lines.append("\(k)=" + e(params[k] ?? 0)) }
         }
-        lines.append("R = \(f(correlation))")
-        lines.append("N = \(pointCount)")
+        lines.append(e(pointCount > 0 ? (chiSquare / Double(pointCount)).squareRoot() : 0))
+        lines.append("|r|=" + e(Swift.abs(correlation)))
         return lines.joined(separator: "\n")
     }
 }
@@ -88,6 +80,8 @@ public enum FitError: Error, LocalizedError, Equatable {
     case singular
     case badExpression(String)
     case didNotConverge
+    /// 通る点が対数を取れない値(指数は y ≤ 0、対数は x ≤ 0、べき乗は x か y ≤ 0)
+    case passThroughPointOutOfDomain
 
     public var errorDescription: String? {
         switch self {
@@ -95,6 +89,8 @@ public enum FitError: Error, LocalizedError, Equatable {
         case .singular: return "最小二乗の計算ができませんでした(データ点が一直線上に重なっているなど)。"
         case .badExpression(let m): return "関数の式が正しくありません: \(m)"
         case .didNotConverge: return "最小二乗が収束しませんでした。パラメータの初期値を変えてお試しください。"
+        case .passThroughPointOutOfDomain:
+            return "通る点の値が使えません(指数は y > 0、対数は x > 0、べき乗は x > 0 かつ y > 0 の点にしてください)。"
         }
     }
 }
@@ -172,6 +168,9 @@ public enum Fitting {
     }
 
     /// 相関係数。一次式は x と y の相関、それ以外は 1 - 残差/全変動 の平方根
+    /// 相関係数 |r|: √(SSreg / (SSreg + SSres))。SSreg は当てはめた値のその平均からの二乗和、
+    /// SSres は残差の二乗和。切片のある普通の最小二乗では 1 − SSres/SStot と同じで、点を通す当てはめや一般関数でも
+    /// 1 次の多項式(linearX)は x と y の相関の符号を付ける
     static func correlation(fitted: [Double], observed: [Double], linearX: [Double]? = nil) -> Double {
         let n = Double(observed.count)
         guard n >= 2 else { return .nan }
@@ -183,14 +182,28 @@ public enum Fitting {
             }
             return sxx > 0 && syy > 0 ? sxy / Foundation.sqrt(sxx * syy) : .nan
         }
-        let my = observed.reduce(0, +) / n
-        let ssTot = observed.reduce(0) { $0 + ($1 - my) * ($1 - my) }
-        let ssRes = zip(fitted, observed).reduce(0) { $0 + ($1.0 - $1.1) * ($1.0 - $1.1) }
-        guard ssTot > 0 else { return .nan }
-        return Foundation.sqrt(Swift.max(0, 1 - ssRes / ssTot))
+        let mf = fitted.reduce(0, +) / n
+        var ssReg = 0.0, ssRes = 0.0
+        for (f, y) in zip(fitted, observed) {
+            ssReg += (f - mf) * (f - mf)
+            ssRes += (y - f) * (y - f)
+        }
+        guard ssReg + ssRes > 0 else { return 1 }
+        return Foundation.sqrt(ssReg / (ssReg + ssRes))
     }
 
-    static func linear(_ xs: [Double], _ ys: [Double]) throws -> (Double, Double, Double) {
+    /// 直線 y = a0 + a1 x の最小二乗(a0, a1, R)。through があれば、その点を通る直線(R は 1 − 残差/全変動 の平方根)
+    static func linear(_ xs: [Double], _ ys: [Double], through: (Double, Double)? = nil) throws -> (Double, Double, Double) {
+        if let (x0, y0) = through {
+            // y − y0 = a1 (x − x0)
+            guard !xs.isEmpty else { throw FitError.notEnoughPoints(needed: 1) }
+            var sxy = 0.0, sxx = 0.0
+            for (x, y) in zip(xs, ys) { sxy += (x - x0) * (y - y0); sxx += (x - x0) * (x - x0) }
+            guard sxx > 0 else { throw FitError.singular }
+            let a1 = sxy / sxx
+            let fitted = xs.map { y0 + a1 * ($0 - x0) }
+            return (y0 - a1 * x0, a1, correlation(fitted: fitted, observed: ys))
+        }
         let n = Double(xs.count)
         guard xs.count >= 2 else { throw FitError.notEnoughPoints(needed: 2) }
         let mx = xs.reduce(0, +) / n, my = ys.reduce(0, +) / n
@@ -205,35 +218,54 @@ public enum Fitting {
         return (a0, a1, r)
     }
 
-    public static func exponential(x: [Double], y: [Double]) throws -> FitResult {
+    /// 通る点を、直線にした座標(ln x・ln y)に直す
+    static func linearizedPoint(_ p: (Double, Double)?, logX: Bool, logY: Bool) throws -> (Double, Double)? {
+        guard let (px, py) = p else { return nil }
+        guard px.isFinite, py.isFinite, !logX || px > 0, !logY || py > 0 else { throw FitError.passThroughPointOutOfDomain }
+        return (logX ? Foundation.log(px) : px, logY ? Foundation.log(py) : py)
+    }
+
+    /// 指数 ln y = a0 + a1 x(ln y の直線の最小二乗)。passThrough があれば、その点を通る(ln y の上で)
+    public static func exponential(x: [Double], y: [Double], passThrough: (Double, Double)? = nil) throws -> FitResult {
         let pts = zip(x, y).filter { $0.0.isFinite && $0.1.isFinite && $0.1 > 0 }
-        let (a0, a1, r) = try linear(pts.map(\.0), pts.map { Foundation.log($0.1) })
+        let through = try linearizedPoint(passThrough, logX: false, logY: true)
+        let (a0, a1, r) = try linear(pts.map(\.0), pts.map { Foundation.log($0.1) }, through: through)
         var res = FitResult(model: .exponential(a0: a0, a1: a1), correlation: r, chiSquare: 0, pointCount: pts.count)
         res.chiSquare = pts.reduce(0) { let d = Foundation.log($1.1) - (a0 + a1 * $1.0); return $0 + d * d }
         return res
     }
 
-    public static func logarithmic(x: [Double], y: [Double]) throws -> FitResult {
+    /// 対数 y = a0 + a1 ln x。passThrough があれば、その点を通る
+    public static func logarithmic(x: [Double], y: [Double], passThrough: (Double, Double)? = nil) throws -> FitResult {
         let pts = zip(x, y).filter { $0.0.isFinite && $0.1.isFinite && $0.0 > 0 }
-        let (a0, a1, r) = try linear(pts.map { Foundation.log($0.0) }, pts.map(\.1))
+        let through = try linearizedPoint(passThrough, logX: true, logY: false)
+        let (a0, a1, r) = try linear(pts.map { Foundation.log($0.0) }, pts.map(\.1), through: through)
         var res = FitResult(model: .logarithmic(a0: a0, a1: a1), correlation: r, chiSquare: 0, pointCount: pts.count)
         res.chiSquare = pts.reduce(0) { let d = $1.1 - (a0 + a1 * Foundation.log($1.0)); return $0 + d * d }
         return res
     }
 
-    public static func power(x: [Double], y: [Double]) throws -> FitResult {
+    /// べき乗 ln y = a0 + a1 ln x(両対数の直線の最小二乗)。passThrough があれば、その点を通る(両対数の上で)
+    public static func power(x: [Double], y: [Double], passThrough: (Double, Double)? = nil) throws -> FitResult {
         let pts = zip(x, y).filter { $0.0.isFinite && $0.1.isFinite && $0.0 > 0 && $0.1 > 0 }
-        let (a0, a1, r) = try linear(pts.map { Foundation.log($0.0) }, pts.map { Foundation.log($0.1) })
+        let through = try linearizedPoint(passThrough, logX: true, logY: true)
+        let (a0, a1, r) = try linear(pts.map { Foundation.log($0.0) }, pts.map { Foundation.log($0.1) }, through: through)
         var res = FitResult(model: .power(a0: a0, a1: a1), correlation: r, chiSquare: 0, pointCount: pts.count)
         res.chiSquare = pts.reduce(0) { let d = Foundation.log($1.1) - (a0 + a1 * Foundation.log($1.0)); return $0 + d * d }
         return res
     }
 
-    public static let parameterNames = ["a", "b", "c", "d", "e", "f", "g"]
+    /// 一般関数の当てはめのパラメータ(a〜i の 9 個)
+    public static let parameterNames = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
+
+    /// 偏微分を差分で近似するときの刻み(パラメータの値に対する比)。中心差分の誤差が最小になる ε^(1/3)
+    static let differenceStep = Foundation.cbrt(Double.ulpOfOne)
 
     /// 一般関数のフィット(Marquardt 法)。derivatives は ∂f/∂a … ∂f/∂g の式(空なら差分で近似)。
     /// fixed のパラメータは動かさず、initial の値(無ければ 1)の定数として使う。
-    /// tolerancePercent > 0 なら、動かすパラメータの相対変化が 2 回続けてその % 以下になったら止める(0 はこれまでどおり)。
+    /// tolerancePercent > 0 なら、いまの点から二乗和の最小までの残り(減衰なしのガウス・ニュートンの一歩で見積もる)が
+    /// 2 回続けて、動かすパラメータのどれでもその値のその % 以下になったら、その一歩を加えて止める(0 なら止めない)。
+    /// 減衰の大きい小さな一歩は最小から遠くでも起きるので、実際に動いた一歩の大きさでは止めない。
     public static func general(x: [Double], y: [Double], function: String, derivatives: [String] = [],
                                initial: [String: Double] = [:], constants: [String: Double] = [:],
                                maxIterations: Int = 300, fixed: Set<String> = [], tolerancePercent: Double = 0) throws -> FitResult {
@@ -241,7 +273,7 @@ public enum Fitting {
         do { expr = try Expression(function) } catch { throw FitError.badExpression((error as? ExpressionError)?.message ?? "\(error)") }
         let used = expr.referencedVariables()
         let usedParams = parameterNames.filter { used.contains($0) }
-        guard !usedParams.isEmpty else { throw FitError.badExpression("パラメータ a〜g が式に含まれていません。") }
+        guard !usedParams.isEmpty else { throw FitError.badExpression("パラメータ a〜i が式に含まれていません。") }
         let params = usedParams.filter { !fixed.contains($0) }
         let pts = zip(x, y).filter { $0.0.isFinite && $0.1.isFinite }
         let needed = Swift.max(params.count, 1)
@@ -255,10 +287,10 @@ public enum Fitting {
         }
 
         var base = constants
-        for k in ["h", "i"] where base[k] == nil { base[k] = 0 }
-        for name in usedParams where fixed.contains(name) { base[name] = initial[name] ?? 1 }
+        // 当てはめないパラメータは初期値のまま(初期値の行に無ければ 0)
+        for name in usedParams where fixed.contains(name) { base[name] = initial[name] ?? 0 }
         let tolerance = tolerancePercent.isFinite && tolerancePercent > 0 ? tolerancePercent / 100 : 0
-        var p = params.map { initial[$0] ?? 1 }
+        var p = params.map { initial[$0] ?? 0 }
 
         func values(_ p: [Double]) -> [Double] {
             var c = base
@@ -279,11 +311,18 @@ public enum Fitting {
                 if let de = derivExprs[j], let v = try? de.evaluate(ExprContext(count: xs.count, x: xs, y: ys, constants: c)) {
                     cols.append(v)
                 } else {
-                    var q = p
-                    let h = Swift.max(Swift.abs(q[j]) * 1e-6, 1e-8)
-                    q[j] += h
-                    let f1 = values(q)
-                    cols.append(zip(f1, f0).map { ($0 - $1) / h })
+                    // 中心差分。刻みはパラメータの大きさに比例させる(単位によらない)。片側しか計算できない点は片側の差分
+                    let step = p[j] != 0 ? Swift.abs(p[j]) * Fitting.differenceStep : Fitting.differenceStep
+                    var qp = p, qm = p
+                    qp[j] += step; qm[j] -= step
+                    let hp = qp[j] - p[j], hm = p[j] - qm[j]
+                    let fp = values(qp), fm = values(qm)
+                    cols.append((0..<xs.count).map { i in
+                        if fp[i].isFinite && fm[i].isFinite { return (fp[i] - fm[i]) / (hp + hm) }
+                        if fp[i].isFinite { return (fp[i] - f0[i]) / hp }
+                        if fm[i].isFinite { return (f0[i] - fm[i]) / hm }
+                        return .nan
+                    })
                 }
             }
             // 行 = 点、列 = パラメータ
@@ -293,9 +332,68 @@ public enum Fitting {
         var f0 = values(p)
         var current = chi(f0)
         guard current.isFinite else { throw FitError.didNotConverge }
+
+        // 許容誤差があるとき(ファイルの系列はいつもある): Marquardt 法。
+        // λ は 0.01 から、二乗和が減れば 1/10、減らなければ 10 倍。減らした一歩の二乗和の減り方が許容誤差(%)以下で止める。
+        // 偏微分の式が無いパラメータは前進差分(刻みは値の 1/1000)
+        if tolerance > 0 && !params.isEmpty {
+            func jacobianForward(_ p: [Double], _ f0: [Double]) -> [[Double]] {
+                var c = base
+                for (i, n) in params.enumerated() { c[n] = p[i] }
+                var cols: [[Double]] = []
+                for j in params.indices {
+                    if let de = derivExprs[j], let v = try? de.evaluate(ExprContext(count: xs.count, x: xs, y: ys, constants: c)) {
+                        cols.append(v)
+                    } else {
+                        let step = p[j] != 0 ? Swift.abs(p[j]) * 1e-3 : 1e-3
+                        var q = p
+                        q[j] += step
+                        let fq = values(q)
+                        cols.append((0..<xs.count).map { (fq[$0] - f0[$0]) / step })
+                    }
+                }
+                return (0..<xs.count).map { i in cols.map { $0[i] } }
+            }
+            var lambda = 0.01
+            let m = params.count
+            var done = false
+            for _ in 0..<(maxIterations * 20) {
+                let J = jacobianForward(p, f0)
+                var A = [[Double]](repeating: [Double](repeating: 0, count: m), count: m)
+                var g = [Double](repeating: 0, count: m)
+                for (i, row) in J.enumerated() {
+                    let r = ys[i] - f0[i]
+                    for a in 0..<m {
+                        g[a] += row[a] * r
+                        for b in 0..<m { A[a][b] += row[a] * row[b] }
+                    }
+                }
+                for a in 0..<m { A[a][a] *= (1 + lambda) }
+                if let d = solve(A, g) {
+                    let q = zip(p, d).map { $0 + $1 }
+                    let f1 = values(q)
+                    let c1 = chi(f1)
+                    if c1.isFinite && c1 < current {
+                        let decrease = c1 > 0 ? (current - c1) / c1 : 0
+                        p = q; f0 = f1; current = c1
+                        lambda *= 0.1
+                        if decrease <= tolerance { done = true; break }
+                        continue
+                    }
+                }
+                lambda *= 10
+                if lambda > 1e30 { done = true; break }   // これ以上減らせない(最小にいる)
+            }
+            guard done else { throw FitError.didNotConverge }
+            var dict: [String: Double] = base
+            for (i, n) in params.enumerated() { dict[n] = p[i] }
+            return FitResult(model: .general(expression: function, parameters: dict),
+                             correlation: correlation(fitted: f0, observed: ys), chiSquare: current, pointCount: xs.count)
+        }
+
         var lambda = 1e-3
         var converged = params.isEmpty   // 全部固定なら計算するだけ
-        var smallSteps = 0
+        var smallRemainders = 0
         for _ in 0..<(params.isEmpty ? 0 : maxIterations) {
             let J = jacobian(p, f0)
             let m = params.count
@@ -306,6 +404,22 @@ public enum Fitting {
                 for a in 0..<m {
                     JTr[a] += row[a] * r
                     for b in 0..<m { JTJ[a][b] += row[a] * row[b] }
+                }
+            }
+            // 許容誤差: 最小までの残りが 2 回続けて各パラメータの値の tolerance 以下なら、その一歩を加えて止める
+            if tolerance > 0 {
+                if let gn = solve(JTJ, JTr), zip(gn, p).allSatisfy({ d, v in Swift.abs(d) <= tolerance * Swift.abs(v) }) {
+                    smallRemainders += 1
+                    if smallRemainders >= 2 {
+                        let q = zip(p, gn).map { $0 + $1 }
+                        let f1 = values(q)
+                        let c1 = chi(f1)
+                        if c1.isFinite && c1 <= current { p = q; f0 = f1; current = c1 }
+                        converged = true
+                        break
+                    }
+                } else {
+                    smallRemainders = 0
                 }
             }
             var improved = false
@@ -322,13 +436,8 @@ public enum Fitting {
                     current = c1
                     lambda = Swift.max(lambda / 10, 1e-12)
                     improved = true
-                    if rel < 1e-12 || delta.allSatisfy({ Swift.abs($0) < 1e-12 }) { converged = true }
-                    if tolerance > 0 {
-                        // 許容誤差: 各パラメータの相対変化
-                        let small = zip(delta, q).allSatisfy { d, v in Swift.abs(d) <= tolerance * Swift.abs(v) }
-                        smallSteps = small ? smallSteps + 1 : 0
-                        if smallSteps >= 2 { converged = true }
-                    }
+                    // 二乗和がほとんど減らない、または各パラメータの変化がその値に比べて十分小さい(単位によらない比で見る)
+                    if rel < 1e-12 || zip(delta, q).allSatisfy({ d, v in Swift.abs(d) <= 1e-12 * Swift.abs(v) }) { converged = true }
                     break
                 }
                 lambda *= 10
@@ -348,7 +457,7 @@ public enum Fitting {
 
     // MARK: - 線形代数
 
-    /// 最小二乗解(正規方程式を部分ピボット付きで解く。列はスケール済みで条件は良い)
+    /// 最小二乗解(Householder QR。列はスケール済みで条件は良い)
     static func leastSquares(design: [[Double]], rhs: [Double]) throws -> [Double] {
         guard let m = design.first?.count, m > 0 else { throw FitError.singular }
         // Householder QR
@@ -356,6 +465,15 @@ public enum Fitting {
         var b = rhs
         let rows = A.count
         guard rows >= m else { throw FitError.notEnoughPoints(needed: m) }
+        // 階数落ちの判定の大きさ: 点の数 × ε × いちばん長い列の長さ(LAPACK・numpy の lstsq と同じ考え方)。
+        // 違う x の数が次数 + 1 に足りないとき、R の対角は丸めの大きさになり、点が多いほど大きくなるので比で見る
+        var longest = 0.0
+        for j in 0..<m {
+            var s = 0.0
+            for i in 0..<rows { s += A[i][j] * A[i][j] }
+            longest = Swift.max(longest, Foundation.sqrt(s))
+        }
+        let rankTolerance = Double(Swift.max(rows, m)) * Double.ulpOfOne * longest
         for k in 0..<m {
             var norm = 0.0
             for i in k..<rows { norm += A[i][k] * A[i][k] }
@@ -383,7 +501,7 @@ public enum Fitting {
         for i in stride(from: m - 1, through: 0, by: -1) {
             var s = b[i]
             for j in (i + 1)..<m { s -= A[i][j] * x[j] }
-            if Swift.abs(A[i][i]) < 1e-14 { throw FitError.singular }
+            if !(Swift.abs(A[i][i]) > rankTolerance) { throw FitError.singular }
             x[i] = s / A[i][i]
         }
         return x

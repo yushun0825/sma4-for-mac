@@ -654,9 +654,10 @@ final class CanvasView: NSView {
             setShapeEnd(&s, end: 1, local: nb, graph: g)
             return .shape(s)
         case .picture(var pic):
+            let z = pic.shape.absolutePosition ? g.zoomFactor : 1
             let w = pic.shape.x2 - pic.shape.x1, h = pic.shape.y2 - pic.shape.y1
-            pic.shape.x1 = Double(snapped(CGFloat(pic.shape.x1 * 100) + dx)) / 100
-            pic.shape.y1 = Double(snapped(CGFloat(pic.shape.y1 * 100) + dy)) / 100
+            pic.shape.x1 = Double(snapped(CGFloat(pic.shape.x1 * 100) + dx * z)) / 100
+            pic.shape.y1 = Double(snapped(CGFloat(pic.shape.y1 * 100) + dy * z)) / 100
             pic.shape.x2 = pic.shape.x1 + w
             pic.shape.y2 = pic.shape.y1 + h
             return .picture(pic)
@@ -668,18 +669,20 @@ final class CanvasView: NSView {
     /// 矢印などの端をグラフの中の位置に合わせる(位置の単位が軸の値なら値に直す)
     func setShapeEnd(_ s: inout ShapeObject, end: Int, local p: CGPoint, graph g: Graph) {
         let fr = GraphRenderer.Frame(g)
+        // 絶対位置なら mm の値は用紙の左上から
+        let z = Double(g.zoomFactor)
         func vx(_ x: CGFloat) -> Double {
             switch s.xReference {
             case 1: return fr.scales[0].value(atFraction: Double(x) / fr.width)
             case 2: return fr.scales[2].value(atFraction: Double(x) / fr.width)
-            default: return Double(x) / 100
+            default: return s.absolutePosition ? (Double(x) * z + Double(g.left)) / 100 : Double(x) / 100
             }
         }
         func vy(_ y: CGFloat) -> Double {
             switch s.yReference {
             case 1: return fr.scales[1].value(atFraction: 1 - Double(y) / fr.height)
             case 2: return fr.scales[3].value(atFraction: 1 - Double(y) / fr.height)
-            default: return Double(y) / 100
+            default: return s.absolutePosition ? (Double(y) * z + Double(g.top)) / 100 : Double(y) / 100
             }
         }
         if end == 0 { s.x1 = vx(p.x); s.y1 = vy(p.y) } else { s.x2 = vx(p.x); s.y2 = vy(p.y) }
@@ -739,8 +742,9 @@ final class CanvasView: NSView {
             setShapeEnd(&s, end: 1, local: CGPoint(x: b.x + dx, y: b.y + dy), graph: g)
             return .shape(s)
         case .picture(var pic):
-            pic.shape.x1 += Double(dx) / 100; pic.shape.x2 += Double(dx) / 100
-            pic.shape.y1 += Double(dy) / 100; pic.shape.y2 += Double(dy) / 100
+            let z = pic.shape.absolutePosition ? Double(g.zoomFactor) : 1
+            pic.shape.x1 += Double(dx) * z / 100; pic.shape.x2 += Double(dx) * z / 100
+            pic.shape.y1 += Double(dy) * z / 100; pic.shape.y2 += Double(dy) * z / 100
             return .picture(pic)
         case .raw: return o
         }

@@ -20,7 +20,7 @@ func sameGraph(_ a: Graph, _ b: Graph) -> Bool {
 struct DataMaskTests {
     static let maskedFixture = fixtureSMP.replacingOccurrences(
         of: "[MASKS]\n 0\n0\n0\n",
-        with: "[MASKS]\n 2\n0 1.500000e+01 6.000000e+01 0.000000e+00 1.000000e+01\n5 0.000000e+00 1.000000e+00 0.000000e+00 1.000000e+00\n0\n0\n")
+        with: "[MASKS]\n 2\n1 1.500000e+01 6.000000e+01 0.000000e+00 1.000000e+01\n5 0.000000e+00 1.000000e+00 0.000000e+00 1.000000e+00\n0\n0\n")
 
     func data() -> Data { Sma4TextEncoding.encodeSMP(DataMaskTests.maskedFixture.replacingOccurrences(of: "\n", with: "\r\n")) }
 
@@ -28,11 +28,11 @@ struct DataMaskTests {
         #expect(DataMaskTests.maskedFixture != fixtureSMP)
         let p = try SMPReader.read(data: data(), fileName: "m.SMP")
         let g = p.graphs[0]
-        #expect(g.masks == [DataMask(seriesIndex: 0, xMin: 15, xMax: 60, yMin: 0, yMax: 10),
-                            DataMask(seriesIndex: 5, xMin: 0, xMax: 1, yMin: 0, yMax: 1)])
+        #expect(g.masks == [DataMask(target: 1, xMin: 15, xMax: 60, yMin: 0, yMax: 10),
+                            DataMask(target: 5, xMin: 0, xMax: 1, yMin: 0, yMax: 1)])
         #expect(g.maskTrailingLines == ["0", "0"])
         let text = SMPWriter.text(for: p, now: fixedNow)
-        #expect(text.contains("[MASKS]\r\n 2\r\n0 1.500000e+01 6.000000e+01 0.000000e+00 1.000000e+01\r\n5 0.000000e+00 1.000000e+00 0.000000e+00 1.000000e+00\r\n0\r\n0\r\n\r\n[DATA]"))
+        #expect(text.contains("[MASKS]\r\n 2\r\n1 1.500000e+01 6.000000e+01 0.000000e+00 1.000000e+01\r\n5 0.000000e+00 1.000000e+00 0.000000e+00 1.000000e+00\r\n0\r\n0\r\n\r\n[DATA]"))
         let back = try SMPReader.read(data: SMPWriter.data(for: p, now: fixedNow), fileName: "m.SMP")
         #expect(sameGraph(g, back.graphs[0]))
         #expect(SMPWriter.text(for: back, now: fixedNow) == text)
@@ -60,6 +60,24 @@ struct DataMaskTests {
         #expect(d[1].masked.isEmpty)
     }
 
+    /// 対象 0 はすべての系列、k は k 番目の系列(1 から数える)
+    @Test func targetZeroMeansAllSeries() throws {
+        var p = SMPProject()
+        p.setDataFile(DataFile(name: "a.dat", lines: (1...10).map { "\($0) \($0)" }))
+        p.setDataFile(DataFile(name: "b.dat", lines: (1...10).map { "\($0) \(Double($0) + 0.5)" }))
+        var g = Graph.makeDefault()
+        g.series = [Series(name: "a.dat"), Series(name: "b.dat")]
+        g.masks = [DataMask(target: 0, xMin: 2.5, xMax: 5.5, yMin: 0, yMax: 100),
+                   DataMask(target: 1, xMin: 0, xMax: 100, yMin: 6.5, yMax: 8.5)]
+        p.graphs = [g]
+        let d = SeriesEvaluator.evaluate(graph: g, project: p)
+        let shown = d.map { s in s.x.filter(\.isFinite) }
+        #expect(shown[0] == [1, 2, 6, 9, 10])
+        #expect(shown[1] == [1, 2, 6, 7, 8, 9, 10])
+        #expect(DataMask(target: 0, xMin: 0, xMax: 1, yMin: 0, yMax: 1).seriesIndex == nil)
+        #expect(DataMask(target: 2, xMin: 0, xMax: 1, yMin: 0, yMax: 1).seriesIndex == 1)
+    }
+
     @Test func maskExcludedFromFitAndScale() throws {
         var p = SMPProject()
         p.setDataFile(DataFile(name: "line.dat", lines: ["1 3 0.5", "2 5 0.5", "3 100 50", "4 9 0.5", "5 11 0.5"]))
@@ -71,7 +89,7 @@ struct DataMaskTests {
         s.considerOutOfRange = true
         s.errorBarY = .plusMinus
         g.series = [s]
-        g.masks = [DataMask(seriesIndex: 0, xMin: 3.5, xMax: 2.5, yMin: 50, yMax: 150)]
+        g.masks = [DataMask(target: 1, xMin: 3.5, xMax: 2.5, yMin: 50, yMax: 150)]
         p.graphs = [g]
         let d = SeriesEvaluator.evaluate(graph: g, project: p)
         guard case .polynomial(let c, _, _, _) = d[0].fit?.model else { Issue.record("最小二乗が無い"); return }
@@ -83,8 +101,8 @@ struct DataMaskTests {
         GraphOps.clearScale(&p, graphIndex: 0, axes: [1])
         #expect(p.graphs[0].axes[1].to < 100)
         // 系列を消して番号が合わなくなっても落ちない
-        p.graphs[0].masks.append(DataMask(seriesIndex: -1, xMin: 0, xMax: 1, yMin: 0, yMax: 1))
-        p.graphs[0].masks.append(DataMask(seriesIndex: 99, xMin: 0, xMax: 1, yMin: 0, yMax: 1))
+        p.graphs[0].masks.append(DataMask(target: -1, xMin: 0, xMax: 1, yMin: 0, yMax: 1))
+        p.graphs[0].masks.append(DataMask(target: 99, xMin: 0, xMax: 1, yMin: 0, yMax: 1))
         #expect(SeriesEvaluator.evaluate(graph: p.graphs[0], project: p).count == 1)
     }
 }
@@ -113,7 +131,7 @@ struct PictureTests {
         p.graphs[0].objects.insert(ObjectItem(.picture(pic)), at: 1)
         let text = SMPWriter.text(for: p, now: fixedNow)
         #expect(text.contains("[LEGEND]\r\n5\r\n"))
-        #expect(text.contains("\r\n10\r\nC:\\Users\\lab\\写真.bmp\r\n0 0 640 480\r\n1.000000e+01 2.000000e+01 6.000000e+01 5.000000e+01 0 0 40 500 0 0 300 1 16777215 0 0 1 30 100 0 7\r\n\r\n5\r\n"))
+        #expect(text.contains("\r\n10\r\nC:\\Users\\lab\\写真.bmp\r\n0 0 640 480\r\n1.000000e+01 2.000000e+01 6.000000e+01 5.000000e+01 0 0 40 500 0 10 300 1 16777215 0 0 1 30 100 0 7\r\n\r\n5\r\n"))
         let back = try SMPReader.read(data: SMPWriter.data(for: p, now: fixedNow), fileName: "test.SMP")
         #expect(back.graphs[0].objects.count == 5)
         guard case .picture(let q) = back.graphs[0].objects[1].object else { Issue.record("図が無い"); return }
@@ -128,7 +146,7 @@ struct PictureTests {
         // 情報の行が無いものは 0 0 0 0 で書く
         let bare = PictureObject(path: "a.wmf", info: [])
         #expect(SMPWriter.legendLines([.picture(bare)])[3] == "0 0 0 0")
-        #expect(PictureObject.newInfo(pixelWidth: 320, pixelHeight: 200) == [0, 0, 320, 200])
+        #expect(PictureObject.newInfo(pixelWidth: 320, pixelHeight: 200, widthMM: 50) == [320, 200, 5000, 3125])
     }
 
     @Test func boundsAndDrawing() throws {
@@ -175,6 +193,7 @@ func peakData(_ shape: ExtensionAnalysis, noise: Bool = false) -> (x: [Double], 
 
 func roughStart() -> PeakFitSettings {
     var s = PeakFitSettings()
+    s.varyOffset = true; s.precision = 1e-6  // 既定は Offset を動かさない・精度 0.1
     s.count = 2
     s.offset = 1
     s.intensity[0] = 8; s.position[0] = 28; s.width[0] = 10
@@ -188,9 +207,12 @@ struct ExtensionAnalysisTests {
         #expect(ExtensionAnalysis.allCases.map(\.rawValue) == ["GAUSSF2", "LORENF2", "GetMax", "GetMin", "PeakDct", "SMOOTH"])
         #expect(ExtensionAnalysis.allCases.map(\.menuTitle) == ["ガウス関数で当てはめ", "ローレンツ関数で当てはめ", "最大値を探す", "最小値を探す", "ピークを探す", "なめらかにする"])
         #expect(ExtensionAnalysis.allCases.filter(\.usesFittingDialog) == [.gaussian, .lorentzian])
+        #expect(ExtensionAnalysis.menuCases == [.gaussian, .lorentzian, .getMax, .getMin, .peakDetect])
         var s = Series(name: "a.dat")
         s.extensionAnalysis = .peakDetect
-        #expect(s.kind == .extension1 && s.kindRaw == 8 && !s.hasCurve)
+        #expect(s.kind == .extension1 && s.kindRaw == 8 && !s.hasCurve && s.option == "PeakDct")
+        s.extensionAnalysis = .getMax
+        #expect(s.kind == .extension2 && s.kindRaw == 9 && s.option == "GetMax")
         s.extensionAnalysis = .smoothing
         #expect(s.hasCurve)
         s.extensionAnalysis = nil
@@ -210,7 +232,9 @@ struct ExtensionAnalysisTests {
 
         // データから作った初期値からでも、少し揺らしたデータでも収束する
         let (nx, ny) = peakData(a, noise: true)
-        let guess = PeakFitSettings.initialGuess(x: nx, y: ny, count: 2)
+        var guess = PeakFitSettings.initialGuess(x: nx, y: ny, count: 2)
+        #expect(guess.varyOffset && guess.precision == 0.1)
+        guess.precision = 1e-6
         #expect(guess.count == 2 && abs(guess.position[0] - 30) <= 1 && abs(guess.position[1] - 62) <= 1)
         let g = try ExtensionAnalyzer.run(a, x: nx, y: ny, settings: guess, samples: []).fitted
         #expect(abs(g.position[0] - 30) < 0.01 && abs(g.position[1] - 62) < 0.01)
@@ -243,15 +267,17 @@ struct ExtensionAnalysisTests {
         #expect(try ExtensionAnalyzer.run(.getMin, x: x, y: y, settings: PeakFitSettings(), samples: []).lines == ["MIN(X,Y)= 4, 1"])
         #expect(throws: FitError.self) { try ExtensionAnalyzer.run(.getMax, x: [.nan], y: [1], settings: PeakFitSettings(), samples: []) }
 
-        // 2 つのピーク + (最大 − 最小) の 5 % に届かない小さな山
-        var (px, py) = peakData(.gaussian)
-        py = zip(px, py).map { $1 + 0.2 * exp(-pow($0 - 85, 2) / 2) }
-        let peaks = try ExtensionAnalyzer.run(.peakDetect, x: px.reversed(), y: py.reversed(), settings: PeakFitSettings(), samples: [])
-        #expect(peaks.lines == ["(x,y)=(30, 12)", "(x,y)=(62, 8)"])
+        // 2 つの山と、その間の谷
+        let (px, py) = peakData(.gaussian)
+        let rounded = py.map { ($0 * 1e6).rounded() / 1e6 }
+        let peaks = try ExtensionAnalyzer.run(.peakDetect, x: px, y: rounded, settings: PeakFitSettings(), samples: [])
+        #expect(peaks.lines == ["(x,y)=(30, 12)", "(x,y)=(62, 8)", "(x,y)=(43.5, 2.01197)"])
         #expect(peaks.curve.isEmpty)
-        #expect(ExtensionAnalyzer.detectPeaks(x: px, y: py, minimumFraction: 0.01).count == 3)
-        // 平らな頂上は真ん中
-        #expect(ExtensionAnalyzer.detectPeaks(x: [0, 1, 2, 3, 4, 5], y: [0, 1, 5, 5, 5, 0]).map(\.x) == [3])
+        // 山と谷・平らなところ・端を混ぜた並び
+        let ys: [Double] = [0, 5, 1, 4, 2, 6, 6, 3, 7, 0.5, 2, 1, 1, 3, 2.5, 2.5, 2.5, 4, -1]
+        let found = ExtensionAnalyzer.detectPeaks(x: ys.indices.map(Double.init), y: ys)
+        #expect(found.map(\.x) == [8, 9, 1, 17, 2, 4, 7, 3, 13, 10])
+        #expect(ExtensionAnalyzer.detectPeaks(x: [0, 1, 2, 3, 4, 5], y: [9, 3, 1, 2, 8, 4]).map(\.x) == [4, 2])
 
         let sx = (0..<10).map(Double.init)
         let spike: [Double] = [0, 0, 0, 0, 10, 0, 0, 0, 0, 0]
@@ -274,6 +300,7 @@ struct ExtensionAnalysisTests {
         var s = Series(name: "peaks.dat")
         s.extensionAnalysis = a
         s.peakFit = PeakFitSettings.initialGuess(x: xs, y: ys, count: 2)
+        s.peakFit.precision = 1e-6
         s.curveDivisions = 100
         s.curveLineType = .dash
         g.series = [s]
@@ -304,35 +331,54 @@ struct ExtensionAnalysisTests {
 
     @Test func kind8InSMP() throws {
         var p = extensionProject(.gaussian)
-        p.graphs[0].series[0].peakFit.precision = 1e-8
-        p.graphs[0].series[0].peakFit.varyWidth[1] = false
+        p.graphs[0].series[0].peakFit.precision = 0.05
+        p.graphs[0].series[0].peakFit.varyOffset = true
+        p.graphs[0].series[0].peakFit.offset = 1.5
+        p.graphs[0].series[0].peakFit.intensity[0] = 8; p.graphs[0].series[0].peakFit.position[0] = 28; p.graphs[0].series[0].peakFit.width[0] = 10
+        p.graphs[0].series[0].peakFit.intensity[1] = 5; p.graphs[0].series[0].peakFit.position[1] = 65; p.graphs[0].series[0].peakFit.width[1] = 9
+        p.graphs[0].series[0].peakFit.varyPosition[0] = false
+        p.graphs[0].series[0].peakFit.varyIntensity[1] = false
         p.graphs[0].series[0].extraLines = ["UNKNOWN 1"]
         let s = p.graphs[0].series[0]
         let text = SMPWriter.text(for: p, now: fixedNow)
+        // 同じ条件を保存した形
         #expect(text.contains("[peaks.dat]\r\npeaks.dat\r\n8 0 0 0 0 1 "))
-        let f = s.peakFit
-        let expected = ["GAUSSF2", "2 1 \(f.offset) 1e-08",
-                        "\(f.intensity[0]) \(f.position[0]) \(f.width[0]) 1 1 1",
-                        "\(f.intensity[1]) \(f.position[1]) \(f.width[1]) 1 1 0",
-                        "1.0 0.0 1.0 1 1 1", "1.0 0.0 1.0 1 1 1", "1.0 0.0 1.0 1 1 1", "1.0 0.0 1.0 1 1 1", "UNKNOWN 1"]
+        #expect(text.contains(" -1 GAUSSF2\r\n"))
+        let expected = ["4", "0.050000", "1 1.500000", "1 8 0 28 1 10", "0 5 1 65 1 9", "UNKNOWN 1"]
         #expect(text.contains("\r\n" + expected.joined(separator: "\r\n") + "\r\n\r\n\r\n[GRAPH]"))
         let back = try SMPReader.read(data: SMPWriter.data(for: p, now: fixedNow))
         let t = back.graphs[0].series[0]
         #expect(t.kind == .extension1 && t.extensionAnalysis == .gaussian)
-        #expect(t.peakFit == s.peakFit)
+        #expect(t.peakFit.count == 2 && t.peakFit.intensity[0] == 8 && t.peakFit.position[1] == 65 && !t.peakFit.varyPosition[0] && !t.peakFit.varyIntensity[1])
+        #expect(t.peakFit.precision == 0.05 && t.peakFit.offset == 1.5 && t.peakFit.varyOffset)
         #expect(t.extraLines == ["UNKNOWN 1"])
-        #expect(sameGraph(p.graphs[0], back.graphs[0]))
-        #expect(SMPWriter.text(for: back, now: fixedNow) == text)
+        let t2 = SMPWriter.text(for: back, now: fixedNow)
+        #expect(SMPWriter.text(for: try SMPReader.read(text: t2), now: fixedNow) == t2)
 
-        // 名前だけの形・知らない形(元の Sma4 が書いたかもしれないもの)も読める
-        let named = text.replacingOccurrences(of: expected.dropLast().joined(separator: "\r\n"), with: "SMOOTH")
-        let n = try SMPReader.read(text: named).graphs[0].series[0]
-        #expect(n.extensionAnalysis == .smoothing && n.peakFit == PeakFitSettings() && n.extraLines == ["UNKNOWN 1"])
-        let foreign = text.replacingOccurrences(of: expected.dropLast().joined(separator: "\r\n"), with: "FOO 1 2 3")
+        // 最大値は種類 9、後ろの行は "0" だけ
+        var q = extensionProject(.getMax)
+        q.graphs[0].series[0].extensionAnalysis = .getMax
+        let tq = SMPWriter.text(for: q, now: fixedNow)
+        #expect(tq.contains("\r\n9 0 0 0 0 1 ") && tq.contains(" -1 GetMax\r\n"))
+        #expect(tq.contains("\r\n0\r\n\r\n\r\n[GRAPH]"))
+        let bq = try SMPReader.read(text: tq).graphs[0].series[0]
+        #expect(bq.kind == .extension2 && bq.extensionAnalysis == .getMax && bq.extraLines.isEmpty)
+
+        // Sma4 for Mac 2.2.1 までの形(名前の行から始まる)も読める
+        let legacy = text.replacingOccurrences(of: " -1 GAUSSF2\r\n", with: " -1 \r\n")
+            .replacingOccurrences(of: expected.dropLast().joined(separator: "\r\n"),
+                                  with: ["GAUSSF2", "2 1 1.5 0.05", "8.0 28.0 10.0 1 0 1", "5.0 65.0 9.0 0 1 1",
+                                         "1.0 0.0 1.0 1 1 1", "1.0 0.0 1.0 1 1 1", "1.0 0.0 1.0 1 1 1", "1.0 0.0 1.0 1 1 1"].joined(separator: "\r\n"))
+        let l = try SMPReader.read(text: legacy).graphs[0].series[0]
+        #expect(l.extensionAnalysis == .gaussian && l.peakFit.count == 2 && l.peakFit.position[0] == 28 && !l.peakFit.varyPosition[0])
+        #expect(l.extraLines == ["UNKNOWN 1"])
+
+        // 知らない名前は行のまま残す
+        let foreign = text.replacingOccurrences(of: " -1 GAUSSF2\r\n", with: " -1 FOO\r\n")
         let foreignProject = try SMPReader.read(text: foreign)
         let u = foreignProject.graphs[0].series[0]
-        #expect(u.kind == .extension1 && u.extensionAnalysis == nil && u.extraLines == ["FOO 1 2 3", "UNKNOWN 1"])
-        #expect(SMPWriter.text(for: foreignProject, now: fixedNow).contains("\r\nFOO 1 2 3\r\nUNKNOWN 1\r\n"))
+        #expect(u.kind == .extension1 && u.extensionAnalysis == nil && u.extraLines == expected)
+        #expect(SMPWriter.text(for: foreignProject, now: fixedNow).contains("\r\n" + expected.joined(separator: "\r\n") + "\r\n"))
         #expect(SeriesEvaluator.evaluate(graph: foreignProject.graphs[0], project: foreignProject)[0].curve.isEmpty)
     }
 }

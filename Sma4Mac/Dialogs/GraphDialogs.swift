@@ -6,11 +6,13 @@ import Sma4Core
 enum GraphDialogs {
     static let axisCaptions = ["X軸", "Y軸", "U軸", "R軸"]
     static let commonTitles = ["U軸も同じ", "R軸も同じ", "X軸も同じ", "Y軸も同じ"]
-    static let crossItems = ["おまかせ", "最小", "最大"]
+    /// 軸グラフの交差位置: おまかせ(-1)と、主目盛の 1〜20 個目(値は 0〜19)
+    static let crossItems = ["おまかせ"] + (1...20).map(String.init)
 
     // MARK: - X・Y・U・R 軸(範囲・目盛・数字)
 
-    static func axis(_ index: Int, graph g0: Graph, over window: NSWindow?, startPage: Int = 0) -> Graph? {
+    /// linked は「他のグラフとリンク」の今の状態。返り値の linked は OK を押したときの状態
+    static func axis(_ index: Int, graph g0: Graph, linked: Bool = false, over window: NSWindow?, startPage: Int = 0) -> (graph: Graph, linked: Bool)? {
         let sheet = PropertySheet(title: axisCaptions[index],
                                   pages: [("範囲", .axisScale), ("目盛", .axisTicks), ("数字", .axisNumbers)],
                                   start: startPage)
@@ -29,10 +31,13 @@ enum GraphDialogs {
         p1.setText(512, commonTitles[index])
         p1.setChecked(512, g0.axes[base].commonWithOpposite)
         p1.setEnabled(512, g0.frameType == .box)
-        // 他のグラフとのリンクと目盛変換はまだ使えない
-        p1.setEnabled(793, false)
-        p1.setEnabled(794, false)
-        p1.setEnabled(795, false)
+        p1.setChecked(793, linked)
+        // 目盛変換: 目盛の数字だけを式で計算し直す(x が目盛の値)
+        p1.setChecked(794, a.transformEnabled)
+        p1.setText(795, a.transformExpression)
+        let transformChanged = { p1.setEnabled(795, p1.isChecked(794)) }
+        p1.on(794, transformChanged)
+        transformChanged()
         let autoChanged = {
             let on = p1.isChecked(511)
             p1.setEnabled(515, !on)
@@ -66,7 +71,7 @@ enum GraphDialogs {
         p2.on(551, limitChanged)
         limitChanged()
         p2.setItems(544, crossItems)
-        p2.select(544, a.crossPosition < 0 ? 0 : (a.crossPosition >= 10000 ? 2 : 1))
+        p2.select(544, a.crossPosition < 0 ? 0 : min(a.crossPosition + 1, crossItems.count - 1))
         p2.setEnabled(544, g0.frameType == .axes)
 
         // 数字
@@ -76,7 +81,7 @@ enum GraphDialogs {
         p3.setChecked(546, a.zeroPadding)
         p3.setChecked(545, a.plusSign)
         p3.setChecked(549, a.drawGetta)
-        p3.setEnabled(550, false)
+        p3.setChecked(550, g0.plainLogDecades)
         p3.setItems(742, Lists.latinFonts())
         p3.setText(742, a.font.faceName)
         p3.setupColorPopup(790, color: a.labelColor)
@@ -144,16 +149,18 @@ enum GraphDialogs {
         n.limitRange = p2.isChecked(551)
         n.limitStart = Int((p2.number(541, or: Double(a.limitStart) / 100) * 100).rounded())
         n.limitEnd = Int((p2.number(542, or: Double(a.limitEnd) / 100) * 100).rounded())
-        switch p2.selectedIndex(544) {
-        case 1: n.crossPosition = 0
-        case 2: n.crossPosition = 10000
-        default: n.crossPosition = -1
+        let cross = p2.selectedIndex(544)
+        // 選び直さなければファイルの値のまま(20 個目より後ろの値も消さない)
+        if cross != (a.crossPosition < 0 ? 0 : min(a.crossPosition + 1, crossItems.count - 1)) {
+            n.crossPosition = cross <= 0 ? -1 : cross - 1
         }
         n.drawLabels = p3.isChecked(538)
         n.zeroAsInteger = p3.isChecked(547)
         n.zeroPadding = p3.isChecked(546)
         n.plusSign = p3.isChecked(545)
         n.drawGetta = p3.isChecked(549)
+        n.transformEnabled = p1.isChecked(794)
+        n.transformExpression = p1.text(795).trimmingCharacters(in: .whitespaces)
         let face = p3.text(742).trimmingCharacters(in: .whitespaces)
         if !face.isEmpty { n.font.faceName = face }
         let style = max(p3.selectedIndex(788), 0)
@@ -172,6 +179,7 @@ enum GraphDialogs {
         let common = p1.isChecked(512)
         g.axes[index] = n
         g.zeroCommon = p3.isChecked(548)
+        g.plainLogDecades = p3.isChecked(550)
         g.axes[base].commonWithOpposite = common
         g.axes[base + 2].commonWithOpposite = common
         // 共通なら U・R は X・Y と同じ値にしておく(SMP の書き方)
@@ -179,15 +187,14 @@ enum GraphDialogs {
             if index < 2 { g.axes[index + 2] = mirrored(g.axes[index], from: g.axes[index + 2]) }
             else { g.axes[base] = mirrored(g.axes[index], from: g.axes[base]); g.axes[base].commonWithOpposite = true }
         }
-        return g
+        return (g, p1.isChecked(793))
     }
 
+    /// 共通にした反対側の軸の値(範囲・目盛の付け方・目盛線だけを写す)
     static func mirrored(_ a: AxisSpec, from old: AxisSpec) -> AxisSpec {
-        var m = a
-        m.drawLabels = old.drawLabels
-        m.line2Tail = old.line2Tail
-        m.labelShiftX = old.labelShiftX
-        m.labelShiftY = old.labelShiftY
+        var m = old
+        GraphOps.copyCommonAxisSettings(from: a, to: &m)
+        m.commonWithOpposite = a.commonWithOpposite
         return m
     }
 
@@ -210,7 +217,7 @@ enum GraphDialogs {
         p2.setText(787, g0.name)
         p2.setText(788, g0.comment)
         p2.setInteger(789, g0.zoom)
-        p2.setEnabled(790, false)
+        p2.setChecked(790, g0.codesCountVisibleDataOnly)
 
         let rows: [(check: Int, lo: Int, hi: Int, axis: Int)] = [(778, 787, 788, 0), (779, 789, 790, 1), (780, 791, 792, 2), (781, 793, 794, 3)]
         for r in rows {
@@ -252,6 +259,7 @@ enum GraphDialogs {
         let name = p2.text(787).trimmingCharacters(in: .whitespaces)
         if !name.isEmpty { g.name = name }
         g.comment = p2.text(788)
+        g.codesCountVisibleDataOnly = p2.isChecked(790)
         // 等倍設定: 右マージン・上マージンを保ったまま大きさを変える
         let newZoom = max(p2.integer(789, or: g0.zoom), 1)
         if newZoom != g0.zoom {

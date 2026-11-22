@@ -21,6 +21,12 @@ public enum ExtensionAnalysis: String, CaseIterable, Sendable {
         }
     }
 
+    /// 特殊処理のメニューに出す 5 つ(なめらかにする処理は出さない)
+    public static let menuCases: [ExtensionAnalysis] = [.gaussian, .lorentzian, .getMax, .getMin, .peakDetect]
+
+    /// SMP の系列の種類。最大値・最小値は 9、ほかは 8
+    public var seriesKind: Series.Kind { self == .getMax || self == .getMin ? .extension2 : .extension1 }
+
     /// 「Fitting Cond.」のダイアログを使うか
     public var usesFittingDialog: Bool { self == .gaussian || self == .lorentzian }
 
@@ -45,9 +51,10 @@ public struct PeakFitSettings: Hashable, Sendable {
     public var varyPosition: [Bool] = Array(repeating: true, count: PeakFitSettings.maxPeaks)
     public var varyWidth: [Bool] = Array(repeating: true, count: PeakFitSettings.maxPeaks)
     public var offset: Double = 0
-    public var varyOffset: Bool = true
-    /// 精度(二乗和の相対変化がこれより小さくなったら止める)
-    public var precision: Double = 1e-6
+    /// Offset を動かすか(窓の既定は動かさない)
+    public var varyOffset: Bool = false
+    /// 精度(二乗和の相対変化がこれより小さくなったら止める。窓の既定は 0.1)
+    public var precision: Double = 0.1
 
     public init() {}
 
@@ -63,7 +70,7 @@ public struct PeakFitSettings: Hashable, Sendable {
         s.varyIntensity = pad(varyIntensity, true)
         s.varyPosition = pad(varyPosition, true)
         s.varyWidth = pad(varyWidth, true)
-        if !(precision.isFinite && precision > 0) { s.precision = 1e-6 }
+        if !(precision.isFinite && precision > 0) { s.precision = 0.1 }
         return s
     }
 
@@ -80,6 +87,7 @@ public struct PeakFitSettings: Hashable, Sendable {
         let span = last.0 - first.0
         let fallbackWidth = span > 0 ? span / Double(4 * n) : 1
         s.offset = lo
+        s.varyOffset = true   // 見積もった Offset から動かす(精度は窓の既定 0.1 のまま)
 
         var chosen = PeakFinder.maxima(ys).sorted { $0.prominence > $1.prominence }.prefix(n).map(\.index)
         if chosen.isEmpty, let iMax = ys.indices.max(by: { ys[$0] < ys[$1] }) { chosen = [iMax] }
@@ -147,24 +155,35 @@ public enum ExtensionAnalyzer {
         return lines
     }
 
-    /// Peak Detect: 極大のうち、高さ(prominence)が (最大 − 最小) の 5 % 以上のもの。x の順。
-    public static func detectPeaks(x: [Double], y: [Double], minimumFraction: Double = 0.05) -> [(x: Double, y: Double)] {
-        let pts = zip(x, y).filter { $0.0.isFinite && $0.1.isFinite }.sorted { $0.0 < $1.0 }
-        let xs = pts.map(\.0), ys = pts.map(\.1)
-        guard let lo = ys.min(), let hi = ys.max(), hi > lo else { return [] }
-        let threshold = (hi - lo) * minimumFraction
-        return PeakFinder.maxima(ys).filter { $0.prominence >= threshold }.map { (x: xs[$0.index], y: ys[$0.index]) }
+    /// Peak Detect: データの並びで前後の点より真に大きい点(極大)と真に小さい点(極小)。両端と平らなところは数えない。
+    /// 前後の点との差の大きいほうが大きい順(同じなら前から)に並べる
+    public static func detectPeaks(x: [Double], y: [Double]) -> [(x: Double, y: Double)] {
+        let pts = zip(x, y).filter { $0.0.isFinite && $0.1.isFinite }
+        guard pts.count >= 3 else { return [] }
+        var found: [(index: Int, jump: Double)] = []
+        for i in 1..<(pts.count - 1) {
+            let a = pts[i - 1].1, b = pts[i].1, c = pts[i + 1].1
+            if (b > a && b > c) || (b < a && b < c) {
+                found.append((i, Swift.max(Swift.abs(b - a), Swift.abs(b - c))))
+            }
+        }
+        let ordered = found.enumerated().sorted { l, r in
+            l.element.jump != r.element.jump ? l.element.jump > r.element.jump : l.offset < r.offset
+        }
+        return ordered.map { (x: pts[$0.element.index].0, y: pts[$0.element.index].1) }
     }
 
-    /// n 点の移動平均(両端は窓を短くする)
+    /// n 点の移動平均(両端は窓を短くする)。
+    /// 窓ごとに、真ん中の値からの差を足して平均する(累積和の差を使うと、値に大きな下駄があるとき桁が落ちる)
     public static func movingAverage(_ v: [Double], window: Int = 5) -> [Double] {
         let h = Swift.max(window, 1) / 2
         guard v.count > 1, h > 0 else { return v }
-        var prefix = [Double](repeating: 0, count: v.count + 1)
-        for i in v.indices { prefix[i + 1] = prefix[i] + v[i] }
         return v.indices.map { i in
             let lo = Swift.max(0, i - h), hi = Swift.min(v.count - 1, i + h)
-            return (prefix[hi + 1] - prefix[lo]) / Double(hi - lo + 1)
+            let center = v[i].isFinite ? v[i] : 0
+            var s = 0.0
+            for j in lo...hi { s += v[j] - center }
+            return center + s / Double(hi - lo + 1)
         }
     }
 

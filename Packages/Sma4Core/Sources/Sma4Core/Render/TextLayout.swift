@@ -35,12 +35,32 @@ public struct TextLayout {
         public var underline: Bool
         public var overline: Bool
         public var emSize: Double
+        /// 何行目か(0 から)
+        public var line: Int = 0
     }
 
     public var runs: [Run] = []
     public var bounds: CGRect = .zero
 
     public var isEmpty: Bool { runs.isEmpty }
+
+    /// 1 行ずつ、原点が左端(0)・真ん中(1)・右端(2)になるように横へずらす
+    public func aligned(_ alignment: Int) -> TextLayout {
+        guard alignment == 1 || alignment == 2, !runs.isEmpty else { return self }
+        var out = self
+        var widths: [Int: Double] = [:]
+        for r in runs { widths[r.line] = Swift.max(widths[r.line] ?? 0, r.origin.x + r.width) }
+        for i in out.runs.indices {
+            let w = widths[out.runs[i].line] ?? 0
+            out.runs[i].origin.x -= alignment == 1 ? w / 2 : w
+        }
+        var rect = CGRect.null
+        for r in out.runs {
+            rect = rect.union(CGRect(x: r.origin.x, y: r.origin.y - r.descent, width: r.width, height: r.ascent + r.descent))
+        }
+        out.bounds = rect.isNull ? bounds : rect
+        return out
+    }
 }
 
 public enum TextLayoutEngine {
@@ -69,15 +89,18 @@ public enum TextLayoutEngine {
         let pt = Units.hundredthMMPerPoint
         let latinFamily = FontMapper.macFamily(latin.faceName, japanese: false)
         let jpFamily = FontMapper.macFamily(japanese.faceName, japanese: true)
+        // 和文は和文フォントの書体だけを使い、大きさ・太さ・斜体は欧文フォントにそろえる(和文フォントの大きさ・太さ・斜体の値は使わない)
         var st = State(latinFamily: latinFamily, japaneseFamily: jpFamily,
-                       latinSize: latin.pointSize * pt, japaneseSize: japanese.pointSize * pt,
-                       bold: latin.isBold, italic: latin.isItalic, jpBold: japanese.isBold, jpItalic: japanese.isItalic,
+                       latinSize: latin.pointSize * pt, japaneseSize: latin.pointSize * pt,
+                       bold: latin.isBold, italic: latin.isItalic, jpBold: latin.isBold, jpItalic: latin.isItalic,
                        color: color)
         let baseLatinFont = FontMapper.font(family: latinFamily, size: st.latinSize, bold: st.bold, italic: st.italic)
         let baseAscent = Double(CTFontGetAscent(baseLatinFont))
         let baseDescent = Double(CTFontGetDescent(baseLatinFont))
         var lineSpacing = baseAscent + baseDescent
-        var sampleLength = 1000.0
+        /// %H??? の値 / 100。%E・%F の見本の幅は「文字の高さの 2 倍 × これ」(文字の大きさが 2 倍なら幅も 2 倍、
+        /// %H050 なら半分)。線の無いデータでも、データの無い番号でも同じ幅をとり、見本どうしの間は空けない
+        var sampleScale = 1.0
 
         var layout = TextLayout()
         var penX = 0.0
@@ -112,7 +135,7 @@ public enum TextLayoutEngine {
                 layout.runs.append(TextLayout.Run(content: .glyphs(line),
                                                   origin: CGPoint(x: penX, y: lineBaseline + st.baseline + shiftY),
                                                   width: w, ascent: Double(asc), descent: Double(desc), color: st.color,
-                                                  underline: st.underline, overline: st.overline, emSize: size))
+                                                  underline: st.underline, overline: st.overline, emSize: size, line: lineIndex))
                 penX += w
                 chunk = ""
             }
@@ -127,19 +150,18 @@ public enum TextLayoutEngine {
 
         func appendMarker(_ index: Int, curve: Bool) {
             let i = index == 0 ? 0 : index - 1
-            guard i >= 0, i < env.seriesStyles.count else { return }
+            let length = 2 * emSize() * sampleScale
+            guard i >= 0, i < env.seriesStyles.count else { penX += length; return }
             let s = env.seriesStyles[i]
             let size = Double(s.dotSize)
-            let hasLine = curve ? s.curveLineType != .none : s.lineType != .none
-            let length = curve || hasLine ? sampleLength : Swift.max(size * 1.2, emSize() * 0.6)
             let em = emSize()
             // 文字の中ほど(x の高さ)に合わせる
             let mid = lineBaseline + st.baseline + shiftY + em * 0.3
             layout.runs.append(TextLayout.Run(content: .marker(s, curve: curve, length: length, size: size),
                                               origin: CGPoint(x: penX, y: mid), width: length,
                                               ascent: Swift.max(size / 2, em * 0.7), descent: Swift.max(size / 2 - em * 0.3, 0),
-                                              color: st.color, underline: false, overline: false, emSize: em))
-            penX += length + em * 0.25
+                                              color: st.color, underline: false, overline: false, emSize: em, line: lineIndex))
+            penX += length
         }
 
         func dateString(_ d: Date?, alt: Bool, time: Bool) -> String {
@@ -153,9 +175,11 @@ public enum TextLayoutEngine {
                        : String(format: "%d-%d-%d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
         }
 
-        func seriesName(_ index: Int) -> String {
+        /// データが無い番号は、制御文字をそのまま書く(%05N など)
+        func seriesName(_ index: Int, lower: Bool) -> String {
             let i = index == 0 ? 0 : index - 1
-            return i >= 0 && i < env.seriesNames.count ? env.seriesNames[i] : ""
+            guard i >= 0 && i < env.seriesNames.count else { return String(format: "%%%02d%@", index, lower ? "n" : "N") }
+            return lower ? env.seriesNames[i].lowercased() : env.seriesNames[i]
         }
 
         for t in tokens {
@@ -201,17 +225,18 @@ public enum TextLayoutEngine {
                 let jp = name.unicodeScalars.contains(where: FontMapper.isJapanese)
                 if jp { st.japaneseFamily = FontMapper.macFamily(name, japanese: true) }
                 else { st.latinFamily = FontMapper.macFamily(name, japanese: false) }
-            case .sampleLength(let v): sampleLength = Double(v) * 10
+            case .sampleLength(let v): sampleScale = Double(v) / 100
             case .seriesName(let i, let lower):
-                let n = seriesName(i)
-                appendText(lower ? n.lowercased() : n)
+                appendText(seriesName(i, lower: lower))
             case .seriesMarker(let i): appendMarker(i, curve: false)
             case .seriesCurve(let i): appendMarker(i, curve: true)
             case .seriesDate(let i, let alt):
                 let k = i == 0 ? 0 : i - 1
+                if k >= env.seriesStyles.count { appendText(String(format: "%%%02d%@", i, alt ? "d" : "D")); break }
                 appendText(dateString(k < env.seriesDates.count ? env.seriesDates[k] : nil, alt: alt, time: false))
             case .seriesTime(let i, let alt):
                 let k = i == 0 ? 0 : i - 1
+                if k >= env.seriesStyles.count { appendText(String(format: "%%%02d%@", i, alt ? "t" : "T")); break }
                 appendText(dateString(k < env.seriesDates.count ? env.seriesDates[k] : nil, alt: alt, time: true))
             case .seriesCell(let i, let r, let c):
                 appendText(env.dataCell?(i, r, c) ?? "")

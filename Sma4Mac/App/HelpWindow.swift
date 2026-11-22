@@ -69,9 +69,17 @@ enum HelpWindow {
         #0003 は自分のデータの 3 列目、#0203 は 2 番目に描くデータの 3 列目です。
         欠損データは = か | で書きます(= はエラー値として線を切り、| は読み飛ばします)。
         """),
-        ("図としてコピー", """
+        ("図としてコピー・書き出す", """
         編集 → 図としてコピー(⌘C)で、コピー領域を確かめてから、PDF(拡大しても荒れない形)と PNG をクリップボードに入れます。Word・PowerPoint・Keynote に貼り付けられます。
-        メタファイル(WMF・EMF)の代わりに、ファイル → 書き出す で PDF と PNG を書き出せます。
+        ファイル → 書き出す で PDF・PNG・EMF(拡張メタファイル)を書き出せます。EMF は Office などに線と面の図として貼れます(文字は輪郭の図形になり、図の画像は入りません)。
+        """),
+        ("保存の形", """
+        ふだんは ver. 1.8 の形で保存します。保存の窓の下の「16 ビット版の形式で保存する」を選ぶと、その保存のときだけ ver. 1.5 の形で書きます(目盛変換など ver. 1.5 に無い設定は書きません)。
+        """),
+        ("マクロ", """
+        ツール → マクロを実行…(⌥⌘M)で、マクロのファイル(.smd)を上から 1 行ずつ実行します。
+        使える命令: FrameSet(POS・FRAMETYPE・LINEWIDTH・COLOR)・AxisSet(XSCALE〜RSCALE・XSCALETYPE〜RSCALETYPE・COLOR)・Data(COLUMNX・COLUMNY・PLOTTYPE・PLOTSIZE・COLOR・LINETYPE・LINECOLOR・LINEWIDTH・LINEPITCH・XTRANS・YTRANS・Open)・Insert(XTITLE・YTITLE)・Rem・Label・Goto・Pause・Print・DeleteGraph・OpenSmp・Refresh。
+        読めない行があると、その行の番号を出して止まります。
         """),
     ]
 

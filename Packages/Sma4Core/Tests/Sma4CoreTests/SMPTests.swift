@@ -188,7 +188,8 @@ struct SMPTests {
         #expect(text.hasPrefix(" Sma4Win ver. 1.8  SMP file\r\n振動試験の結果\r\n1 1 210 297 0 100 2\r\n2\r\n[sweep.csv]\r\n"))
         // 軸の範囲は %e で書く
         #expect(text.contains("[AXIS-0]\r\n1.000000e+01 1.000000e+03 1.000000e+01 0 0 10000 -1 -1 0 1 0 0 1 5 5 1.000000e+00 1\r\n"))
-        #expect(text.contains("1 0 0 2 0 1 7 1 -1 \r\n"))
+        // 読んだ行は変えていなければそのまま書く
+        #expect(text.contains("1 0 0 2 0 1 7 1 -1"))
         #expect(text.contains("[sweep.csv] 2026-11-1  9:05:30 "))
         let p2 = try SMPReader.read(data: SMPWriter.data(for: p), fileName: "test.SMP")
         var a = p.graphs[0], b = p2.graphs[0]

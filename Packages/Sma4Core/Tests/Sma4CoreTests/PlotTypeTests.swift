@@ -40,8 +40,9 @@ struct PlotTypeTests {
         #expect(titled.map(\.0) == [0, 13, 26, 27, 28, 33, 34])
         #expect(titled.map(\.1) == ["なし", "縦棒", "横棒", "矩形", "対角線", "縦階段", "横階段"])
         #expect((0...60).filter(PlotType.isBarOrStep) == [13, 26, 27, 28, 33, 34])
-        #expect((0...60).filter(PlotType.fillsWithDotColor) == [2, 4, 6, 8, 10, 13, 19, 20, 21, 22, 23, 26, 27, 33, 34])
-        #expect((-1...60).filter { !PlotType.drawsMark($0) } == [-1, 0, 29, 30, 31, 32, 35, 36, 37] + Array(53...60))
+        // 19〜23 は右半分だけドットの色、27・28 は誤差の列が無いと何も描かない
+        #expect((0...60).filter(PlotType.fillsWithDotColor) == [2, 4, 6, 8, 10, 13, 26, 27, 33, 34])
+        #expect((-1...60).filter { !PlotType.drawsMark($0) } == [-1, 0, 27, 28, 29, 30, 31, 32, 35, 36, 37] + Array(53...60))
     }
 
     @Test func autoCycle() {
@@ -133,7 +134,7 @@ struct PlotTypeTests {
         #expect(center(6, style: 1) == clear)
         #expect(center(10, style: 0) == red && center(9, style: 0) == blue)
         #expect(center(23, style: 0) == red && center(18, style: 0) == blue)
-        #expect(center(13, style: 0) == red && center(26, style: 0) == red && center(27, style: 0) == red)
+        #expect(center(13, style: 0) == red && center(26, style: 0) == red)
 
         // 何も描かない値
         for code in [0, 29, 35] {
@@ -143,11 +144,11 @@ struct PlotTypeTests {
             #expect((0..<64).allSatisfy { y in (0..<64).allSatisfy { x in pixel(ctx, x, y).a == 0 } })
         }
 
-        // 半分塗り: 左はドットの色、右は中塗色
+        // 半分塗り(19〜23): 左は中塗色、右はドットの色
         let half = makeBitmap()
-        GraphRenderer.drawPlotMark(code: 44, center: CGPoint(x: 32, y: 32), diameter: 40, dotColor: .red, lineWidth: 2,
+        GraphRenderer.drawPlotMark(code: 19, center: CGPoint(x: 32, y: 32), diameter: 40, dotColor: .red, lineWidth: 2,
                                    brushStyle: 0, brushColor: .blue, brushHatch: 0, in: half)
-        #expect(pixel(half, 22, 32) == red && pixel(half, 42, 32) == blue)
+        #expect(pixel(half, 22, 32) == blue && pixel(half, 42, 32) == red)
 
         // ハッチ: 中の一部だけがドットの色になる
         let hatched = makeBitmap()
@@ -188,7 +189,7 @@ struct PlotTypeTests {
 
     @Test func barsAndSteps() throws {
         for code in [13, 26, 27, 28, 33, 34] {
-            for style in [0, 1, 2] {
+            for style in [0, 1, 2] where PlotType.drawsMark(code) {
                 var p = barProject(code: code)
                 p.graphs[0].series[0].brushStyle = style
                 p.graphs[0].series[0].brushHatch = 3
@@ -206,9 +207,9 @@ struct PlotTypeTests {
             p.graphs[0].frameType = .axes
             _ = GraphExporter.cgImage(renderer: GraphRenderer(project: p), dpi: 36)
         }
-        // 縦棒は barBase から y まで: 塗りつぶした面積は 対角線(28)の印より大きい
+        // 縦棒は barBase から y まで: 塗りつぶした面積は 斜線(24)の印より大きい
         let bars = try #require(GraphExporter.cgImage(renderer: GraphRenderer(project: barProject(code: 13)), dpi: 72))
-        let marks = try #require(GraphExporter.cgImage(renderer: GraphRenderer(project: barProject(code: 28)), dpi: 72))
+        let marks = try #require(GraphExporter.cgImage(renderer: GraphRenderer(project: barProject(code: 24)), dpi: 72))
         #expect(countPixels(bars, where: isReddish) > 4 * countPixels(marks, where: isReddish))
     }
 

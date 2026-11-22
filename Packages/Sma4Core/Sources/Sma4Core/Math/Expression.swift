@@ -76,6 +76,16 @@ public struct Expression: Sendable, Equatable {
     public var isIdentityX: Bool { root == .variable("x") }
     public var isIdentityY: Bool { root == .variable("y") }
 
+    /// 数式変換の式の本体。先頭の「y=」(X の式なら「x=」。大文字・空白も可)を除いたもの。
+    /// SMP には任意関数を「y=a+b*ln(x)」の形で書いたものがある(式の文字はそのまま持ち、計算するときだけ除く)。
+    public static func body(_ text: String, assigning variable: String) -> String {
+        let t = text.trimmingCharacters(in: .whitespaces)
+        guard let first = t.first, first.lowercased() == variable.lowercased() else { return t }
+        let rest = t.dropFirst().drop(while: { $0.isWhitespace })
+        guard rest.first == "=" else { return t }
+        return rest.dropFirst().trimmingCharacters(in: .whitespaces)
+    }
+
     public func referencedVariables() -> Set<String> {
         var out = Set<String>()
         func walk(_ n: ExprNode) {
@@ -191,7 +201,7 @@ public struct Expression: Sendable, Equatable {
                 case "max": return Swift.max(p, q)
                 case "min": return Swift.min(p, q)
                 case "pow": return Foundation.pow(p, q)
-                case "beta": return Foundation.exp(Foundation.lgamma(p) + Foundation.lgamma(q) - Foundation.lgamma(p + q))
+                case "beta": return Expression.beta(p, q)
                 case "atan2": return Foundation.atan2(p, q)
                 default: return q == 0 ? .nan : Foundation.fmod(p, q)
                 }
@@ -205,6 +215,13 @@ public struct Expression: Sendable, Equatable {
         default:
             throw ExpressionError(message: "\(name)() という関数はありません。", position: 0)
         }
+    }
+
+    /// ベータ関数 B(p, q) = Γ(p) Γ(q) / Γ(p + q)。lgamma は |Γ| の対数なので、負の引数では Γ の符号を掛ける
+    static func beta(_ p: Double, _ q: Double) -> Double {
+        var sp: Int32 = 1, sq: Int32 = 1, ss: Int32 = 1
+        let l = Foundation.lgamma_r(p, &sp) + Foundation.lgamma_r(q, &sq) - Foundation.lgamma_r(p + q, &ss)
+        return Double(sp * sq * ss) * Foundation.exp(l)
     }
 
     /// 隣の点との差から微分する(端は片側)

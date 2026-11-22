@@ -11,7 +11,7 @@ public enum SMPWriter {
         let graphs = project.graphs
         let saveData = graphs.contains { $0.page.saveData }
         if graphs.count <= 1 {
-            if let g = graphs.first { out.append(contentsOf: graphLines(g)) }
+            if let g = graphs.first { out.append(contentsOf: mergedGraphLines(g)) }
         } else {
             out.append(" Sma4Win ver. 1.1  SMA file")
             var header = [String(graphs.count)]
@@ -23,7 +23,7 @@ public enum SMPWriter {
                 var name = g.name.isEmpty ? "Graph\(i + 1).SMP" : g.name
                 if !name.uppercased().hasSuffix(".SMP") { name += ".SMP" }
                 out.append("[\(name)]")
-                out.append(contentsOf: graphLines(g))
+                out.append(contentsOf: mergedGraphLines(g))
             }
         }
         if saveData {
@@ -37,6 +37,51 @@ public enum SMPWriter {
     }
 
     static func b(_ v: Bool) -> String { v ? "1" : "0" }
+
+    /// 曲線の線種・太さ・色・ピッチ。読んだ数が範囲の外でも、値を変えていなければ読んだままの数を書く
+    static func curveStyleFields(_ s: Series) -> String {
+        if let r = s.curveStyleRaw, r.count == 4, let t = Int(r[0]), let w = Int(r[1]), let c = Int(r[2]), let p = Int(r[3]),
+           LineType(code: t) == s.curveLineType, w == s.curveWidth, SMPColor(colorref: c) == s.curveColor, p == s.curvePitch {
+            return r.joined(separator: " ")
+        }
+        return "\(s.curveLineType.rawValue) \(s.curveWidth) \(s.curveColor.colorref) \(s.curvePitch)"
+    }
+
+    /// グラフの行。読んだファイルから変えていない行・値は、読んだときの文字のまま書く
+    static func mergedGraphLines(_ g: Graph) -> [String] {
+        let new = graphLines(g)
+        guard let src = g.source.lines, let norm = g.source.normalized, src.count == norm.count else { return new }
+        if new == norm { return src }
+        // new と norm の最長共通部分列で行を対応させる
+        let n = norm.count, m = new.count
+        var dp = Array(repeating: Array(repeating: 0, count: m + 1), count: n + 1)
+        for i in stride(from: n - 1, through: 0, by: -1) {
+            for j in stride(from: m - 1, through: 0, by: -1) {
+                dp[i][j] = norm[i] == new[j] ? dp[i + 1][j + 1] + 1 : max(dp[i + 1][j], dp[i][j + 1])
+            }
+        }
+        var out: [String] = []
+        var i = 0, j = 0
+        var pendingOld: [Int] = []
+        func mergeTokens(_ oldIndex: Int, _ line: String) -> String {
+            let a = src[oldIndex].components(separatedBy: " "), b = norm[oldIndex].components(separatedBy: " ")
+            let c = line.components(separatedBy: " ")
+            guard a.count == b.count, b.count == c.count else { return line }
+            return zip(zip(a, b), c).map { pair, cur in pair.1 == cur ? pair.0 : cur }.joined(separator: " ")
+        }
+        while j < m {
+            if i < n && norm[i] == new[j] {
+                out.append(src[i]); i += 1; j += 1; pendingOld = []
+            } else if i < n && dp[i + 1][j] >= dp[i][j + 1] {
+                pendingOld.append(i); i += 1
+            } else {
+                // 消えた行の代わりに入った行は、同じ並びの値を読んだときの文字にする
+                if let o = pendingOld.first { out.append(mergeTokens(o, new[j])); pendingOld.removeFirst() } else { out.append(new[j]) }
+                j += 1
+            }
+        }
+        return out
+    }
 
     static func graphLines(_ g: Graph) -> [String] {
         var l: [String] = []
@@ -65,23 +110,23 @@ public enum SMPWriter {
         for item in g.objects { l.append(contentsOf: objectLines(item.object)) }
 
         l.append("[OTHERS]")
-        l.append(" 2")
+        l.append(g.othersCountLine)
         var consts = g.constants
         while consts.count < 9 { consts.append(0) }
         l.append(consts.prefix(9).map(e).joined(separator: " "))
         l.append(g.othersFont.fieldsLine)
         l.append(g.othersFont.faceName)
-        l.append("")
+        l.append(contentsOf: g.othersTailLines.isEmpty ? [""] : g.othersTailLines)
         l.append(contentsOf: maskLines(g))
         l.append("")
         return l
     }
 
-    /// [MASKS]: " 数"、マスクごとに "%d %le %le %le %le"(系列番号 xMin xMax yMin yMax)、残りの行("0" と "0")
+    /// [MASKS]: " 数"、マスクごとに "%d %le %le %le %le"(対象 xMin xMax yMin yMax。対象は 0 = すべての系列、k = k 番目の系列)、残りの行("0" と "0")
     static func maskLines(_ g: Graph) -> [String] {
         var l = ["[MASKS]", " \(g.masks.count)"]
         for m in g.masks {
-            l.append("\(m.seriesIndex) \(e(m.xMin)) \(e(m.xMax)) \(e(m.yMin)) \(e(m.yMax))")
+            l.append("\(m.target) \(e(m.xMin)) \(e(m.xMax)) \(e(m.yMin)) \(e(m.yMax))")
         }
         l.append(contentsOf: g.maskTrailingLines)
         return l
@@ -93,22 +138,24 @@ public enum SMPWriter {
         l.append(s.path.isEmpty ? s.name : s.path)
         let kind = s.kind == .normal && s.kindRaw > 9 ? s.kindRaw : s.kind.rawValue
         l.append("\(kind) 0 \(s.errorBarX.rawValue) \(s.errorBarY.rawValue) \(s.columnX) \(s.columnY) \(s.linesRead) \(s.skipLines) \(s.maxLines) \(s.option)")
-        l.append("\(s.lineWidth) \(s.lineColor.colorref) \(s.pitch) \(b(s.tabAsSpace)) \(b(s.absoluteLineCount)) \(b(s.skipCommentCount)) \(b(s.considerOutOfRange))")
+        l.append("\(s.lineWidth) \(s.lineColor.colorref) \(s.pitch) \(b(s.tabAsSpace)) \(b(s.absoluteLineCount)) \(b(s.skipCommentCount)) \(s.considerOutOfRangeValue)")
         l.append("\(s.lineType.rawValue) \(s.dotType) \(s.dotSize) \(s.dotColor.colorref)")
         l.append("\(b(s.useUAxis)) \(b(s.useRAxis)) \(max(s.readStep, 1)) \(s.horizontalAverage) \(s.verticalAverage) \(s.brushStyle) \(s.brushColor.colorref) \(s.brushHatch)")
         l.append("\(b(s.transformX)) \(b(s.transformY)) \(s.converter)")
         l.append(s.expressionX.isEmpty ? "x" : s.expressionX)
         l.append(s.expressionY.isEmpty ? "y" : s.expressionY)
         l.append("\(s.curveSpacing.rawValue) \(s.curveDivisions) \(s.lsqOrder) \(b(s.passThroughPoint)) \(e(s.curveStart)) \(e(s.curveEnd)) \(e(s.passX)) \(e(s.passY)) \(e(s.barBase))")
-        l.append("\(s.curveLineType.rawValue) \(s.curveWidth) \(s.curveColor.colorref) \(s.curvePitch) \(b(s.curveVisible))")
+        l.append("\(curveStyleFields(s)) \(b(s.curveVisible))")
         if s.kind == .generalLSQ {
             l.append(s.generalParameterLine.isEmpty ? defaultGeneralParameterLine : s.generalParameterLine)
             l.append(s.generalFunction)
             var d = s.generalDerivatives
-            while d.count < 7 { d.append("") }
-            l.append(contentsOf: d.prefix(7))
+            while d.count < 9 { d.append("") }
+            for (k, name) in Series.generalParameterNames.enumerated() {
+                l.append("\(s.generalFixed.contains(name) ? 0 : 1)|\(d[k])")
+            }
         }
-        if s.kind == .extension1, let a = s.extensionAnalysis {
+        if s.kind == .extension1 || s.kind == .extension2, let a = s.extensionAnalysis {
             l.append(contentsOf: extensionLines(a, s.peakFit))
         }
         l.append(contentsOf: s.extraLines)
@@ -117,15 +164,19 @@ public enum SMPWriter {
         return l
     }
 
-    static let defaultGeneralParameterLine = "7 1 1 1 1 1 1 1 0"
+    /// 新しい一般関数の初期値(許容誤差 1 %・a〜f は 1・g〜i は 0。古い既定の行を直したときと同じ)
+    static let defaultGeneralParameterLine = "9 " + [1, 1, 1, 1, 1, 1, 1, 0, 0, 0].map { e(Double($0)) }.joined(separator: " ")
 
     /// 特殊処理(種類 8)の行。決まった書き方が分からないので、このアプリで決めた形(SMPReader.parseExtensionBlock)
+    /// 特殊処理の 9 行目の後ろ(SMPReader.parseExtensionBlock の形)
     static func extensionLines(_ a: ExtensionAnalysis, _ settings: PeakFitSettings) -> [String] {
+        guard a.usesFittingDialog else { return ["0"] }
         let s = settings.normalized
-        func v(_ x: Double) -> String { x.isFinite ? "\(x)" : "0.0" }
-        var l = [a.rawValue, "\(s.count) \(b(s.varyOffset)) \(v(s.offset)) \(v(s.precision))"]
-        for k in 0..<PeakFitSettings.maxPeaks {
-            l.append("\(v(s.intensity[k])) \(v(s.position[k])) \(v(s.width[k])) \(b(s.varyIntensity[k])) \(b(s.varyPosition[k])) \(b(s.varyWidth[k]))")
+        func f(_ x: Double) -> String { String(format: "%f", x.isFinite ? x : 0) }
+        func g(_ x: Double) -> String { String(format: "%g", x.isFinite ? x : 0) }
+        var l = [String(2 + s.count), f(s.precision), "\(b(s.varyOffset)) \(f(s.offset))"]
+        for k in 0..<s.count {
+            l.append("\(b(s.varyIntensity[k])) \(g(s.intensity[k])) \(b(s.varyPosition[k])) \(g(s.position[k])) \(b(s.varyWidth[k])) \(g(s.width[k]))")
         }
         return l
     }
@@ -153,7 +204,7 @@ public enum SMPWriter {
         l.append(a.font.faceName)
         l.append(tickLine(a.major))
         l.append(tickLine(a.minor))
-        l.append("")
+        l.append(a.transformExpression)   // 目盛変換の式(なければ空行)
         return l
     }
 
@@ -183,9 +234,7 @@ public enum SMPWriter {
             return [String(PictureObject.objectType), p.path, info.map(String.init).joined(separator: " "),
                     shapeFieldsLine(p.shape, allTail: true), ""]
         case .text(let t):
-            var tail = t.positionTail
-            if tail.isEmpty { tail = ["0"] }
-            let pos = ["\(t.x)", "\(t.y)", "\(t.color.colorref)", "\(t.backgroundMode)", b(t.absolutePosition)] + tail.prefix(1)
+            let pos = ["\(t.x)", "\(t.y)", "\(t.color.colorref)", "\(t.backgroundMode)", "\(t.alignment)", b(t.absolutePosition)] + t.positionTail
             return [
                 String(t.kind.rawValue),
                 pos.joined(separator: " "),
@@ -225,14 +274,19 @@ public enum SMPWriter {
                 if !first { l.append("") }
                 first = false
                 let body = file.lines
-                let size = Sma4TextEncoding.encodeSMP(body.map { $0 + "\r\n" }.joined()).count
-                let stamp = file.timestamp.isEmpty ? timestamp(now) : normalizedTimestamp(file.timestamp)
-                l.append(String(format: "[%@] %@ %08lx %08lx", s.name, stamp, size & 0xFFFF_FFFF, size >> 32))
+                if let tail = file.unchangedHeaderTail {
+                    l.append("[\(s.name)]" + tail)
+                } else {
+                    // 1.8 形式では見出しは名前と日時だけ
+                    let stamp = file.timestamp.isEmpty ? timestamp(now) : normalizedTimestamp(file.timestamp)
+                    l.append("[\(s.name)] \(stamp)")
+                }
                 l.append(contentsOf: body)
                 l.append("[End of Data]")
             }
         }
-        l.append("")
+        // 書いたデータがあれば最後に空行(データが 1 つも無ければ "[DATA]" だけ)
+        if !first { l.append("") }
         return l
     }
 

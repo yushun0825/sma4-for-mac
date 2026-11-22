@@ -87,6 +87,7 @@ enum MainMenuBuilder {
             submenu("書き出す", [
                 item("PDF…", #selector(W.exportPDF(_:))),
                 item("PNG…", #selector(W.exportPNG(_:))),
+                item("EMF(拡張メタファイル)…", #selector(W.exportEMF(_:))),
             ]),
             item("閉じる", #selector(W.closeWindow(_:)), "w"),
             .separator(),
@@ -182,7 +183,7 @@ enum MainMenuBuilder {
 
     static func analysisMenu() -> NSMenuItem {
         var special: [NSMenuItem] = [item("そのほかの解析について", #selector(W.aboutDLL(_:))), .separator()]
-        for (k, a) in ExtensionAnalysis.allCases.enumerated() {
+        for (k, a) in ExtensionAnalysis.menuCases.enumerated() {
             special.append(item(a.menuTitle, #selector(W.extensionAnalysis(_:)), tag: k))
         }
         return submenu("解析", [
@@ -216,6 +217,8 @@ enum MainMenuBuilder {
             item("設定…", #selector(A.showSettings(_:))),
             .separator(),
             item("計算機", #selector(W.showCalculator(_:)), fKey(3), []),
+            .separator(),
+            item("マクロを実行…", #selector(W.runMacro(_:)), "m", [.command, .option]),
         ])
     }
 

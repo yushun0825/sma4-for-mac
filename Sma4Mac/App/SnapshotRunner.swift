@@ -77,8 +77,10 @@ enum SnapshotRunner {
         cap("list_many") { _ = ListDialogs.chooseMany(title: "表示するファイルの選択", items: names, selected: IndexSet(names.indices), over: window) }
         cap("input") { _ = ListDialogs.input(title: "描画関数の入力", prompt: "式:", text: "sin(x)", over: window) }
         cap("mask") {
-            _ = DataDialogs.maskChoice(masks: [DataMask(seriesIndex: 0, xMin: 1, xMax: 2, yMin: 0.5, yMax: 3)], names: g.series.map(\.displayName), over: window)
+            _ = DataDialogs.maskChoice(masks: [DataMask(target: 0, xMin: 2.5, xMax: 5.5, yMin: 0, yMax: 100),
+                                               DataMask(target: 1, xMin: 1, xMax: 2, yMin: 0.5, yMax: 3)], over: window)
         }
+        cap("mask_target") { _ = ListDialogs.chooseMaskTarget(items: names, over: window) }
         // 文字が無いグラフでも、見本の文字で画像にする
         var sampleText = TextObject()
         sampleText.text = "見本の文字 ^2@"

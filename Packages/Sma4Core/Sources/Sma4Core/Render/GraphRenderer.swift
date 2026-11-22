@@ -3,6 +3,8 @@ import CoreGraphics
 import CoreText
 
 public struct RenderOptions: Sendable {
+    /// 文字を輪郭の図形で描く(EMF への書き出し用)
+    public var textAsPaths: Bool = false
     /// 枠の外にはみ出す点もそのまま描くか(設定「グラフの枠の外を描かない」の逆)
     public var clipToFrame: Bool = false
     public var superscriptScale: Double = 0.7
@@ -51,7 +53,7 @@ public final class GraphRenderer {
             graph = g
             width = Double(g.width)
             height = Double(g.height)
-            scales = (0..<4).map { AxisScale(g.effectiveAxis($0)) }
+            scales = (0..<4).map { AxisScale(g.effectiveAxis($0), plainLogDecades: g.plainLogDecades, constants: g.constants) }
         }
 
         public func px(_ v: Double, axis: Int) -> Double? {
@@ -80,7 +82,7 @@ public final class GraphRenderer {
     public func environment(for graphIndex: Int) -> TextEnvironment {
         var env = TextEnvironment()
         let g = project.graphs[graphIndex]
-        env.seriesNames = g.series.map(\.displayName)
+        env.seriesNames = (g.codesCountVisibleDataOnly ? g.series.filter(\.visible) : g.series).map(\.displayName)
         env.seriesStyles = g.series
         env.fileName = options.fileName
         env.fileDate = options.fileDate
@@ -143,14 +145,20 @@ public final class GraphRenderer {
     // MARK: - 線の種類
 
     /// 線種の点線の長さ(線種の値・ピッチ・太さは 0.01 mm。実線・線なしは空)
+    /// 線種の刻み(0.01 mm、線を引く・空けるの順):
+    /// 周期 T はピッチと太さ×5 の大きいほう。破線は T/2 引いて T/2 空ける。点線は太さの長さの点を T ごと。
+    /// 一点鎖線は T/2 の線と、3T/4 を中心にした太さの長さの点。二点鎖線は T/2 の線と、2T/3・5T/6 を中心にした点(重なれば 1 つ)。
+    /// 刻みは折れ線の角でも続く。どの刻みも端は丸い(GDI の CreatePen の線と同じ)
     public static func dash(_ type: Int, pitch: Int, width: Int) -> [CGFloat] {
-        let p = CGFloat(Swift.max(pitch, 20))
-        let w = CGFloat(Swift.max(width, 5))
+        let w = CGFloat(Swift.max(width, 1))
+        let t = Swift.max(CGFloat(Swift.max(pitch, 1)), 5 * w)
         switch type {
-        case 2: return [p * 0.65, p * 0.35]
-        case 3: return [w, Swift.max(p * 0.5 - w, w)]
-        case 4: return [p * 0.5, p * 0.15, w, p * 0.15]
-        case 5: return [p * 0.4, p * 0.12, w, p * 0.12, w, p * 0.12]
+        case 2: return [t / 2, t / 2]
+        case 3: return [w, t - w]
+        case 4: return [t / 2, t / 4 - w / 2, w, t / 4 - w / 2]
+        case 5:
+            if t / 6 - w > 0 { return [t / 2, t / 6 - w / 2, w, t / 6 - w, w, t / 6 - w / 2] }
+            return [t / 2, t / 6 - w / 2, t / 6 + w, t / 6 - w / 2]
         default: return []
         }
     }
@@ -160,7 +168,7 @@ public final class GraphRenderer {
         ctx.setLineWidth(CGFloat(Swift.max(width, 1)))
         let d = GraphRenderer.dash(type, pitch: pitch, width: width)
         if d.isEmpty { ctx.setLineDash(phase: 0, lengths: []) } else { ctx.setLineDash(phase: 0, lengths: d) }
-        ctx.setLineCap(type == 3 ? .round : .butt)
+        ctx.setLineCap(d.isEmpty ? .butt : .round)
         ctx.setLineJoin(.round)
     }
 
@@ -328,9 +336,19 @@ public final class GraphRenderer {
         }
     }
 
+    /// 軸グラフの軸が交わる点。X 軸の交差位置は縦の軸が通る X の目盛の番号(0 が 1 つ目の主目盛)、Y 軸の交差位置は横の軸が通る
+    /// Y の目盛の番号。おまかせ(-1)なら 0 の位置(範囲に無ければ端)。目盛の数より大きい番号は端
     func axesOrigin(_ fr: Frame) -> CGPoint {
-        let x = fr.px(0, axis: 0).flatMap { $0 >= 0 && $0 <= fr.width ? $0 : nil } ?? 0
-        let y = fr.py(0, axis: 1).flatMap { $0 >= 0 && $0 <= fr.height ? $0 : nil } ?? fr.height
+        func cross(_ axis: Int) -> Double? {
+            let k = fr.graph.effectiveAxis(axis).crossPosition
+            guard k >= 0 else { return nil }
+            let majors = fr.scales[axis].ticks().filter(\.isMajor)
+            return k < majors.count ? majors[k].fraction : 0
+        }
+        let x = cross(0).map { $0 * fr.width }
+            ?? fr.px(0, axis: 0).flatMap { $0 >= 0 && $0 <= fr.width ? $0 : nil } ?? 0
+        let y = cross(1).map { (1 - $0) * fr.height }
+            ?? fr.py(0, axis: 1).flatMap { $0 >= 0 && $0 <= fr.height ? $0 : nil } ?? fr.height
         return CGPoint(x: x, y: y)
     }
 
@@ -360,7 +378,8 @@ public final class GraphRenderer {
             let spec = g.effectiveAxis(axis)
             guard spec.drawLabels else { continue }
             let jp = LogFont.japaneseDefault(points: spec.font.pointSize)
-            let gap = 100.0 + (spec.major.outside ? Double(spec.major.length) : 0)
+            // 方眼では目盛を描かないので、外向きの目盛があっても数字は離さない
+            let gap = 100.0 + (g.frameType != .grid && spec.major.outside ? Double(spec.major.length) : 0)
             for t in fr.scales[axis].ticks() where t.isMajor {
                 guard var label = t.label else { continue }
                 if g.frameType == .axes, g.zeroCommon, t.value == 0 {
@@ -395,19 +414,28 @@ public final class GraphRenderer {
                 if let ctx { drawLayout(lay, at: CGPoint(x: refX, y: refY), angle: 0, ctx: ctx) }
                 boxes.append(LabelBox(rect: CGRect(x: x, y: y - bh, width: bw, height: bh), axis: axis))
             }
-            // ゲタ(×10^n)
-            if spec.drawGetta, spec.gettaOrder != 1, spec.gettaOrder != 0, spec.scaleType == .linear {
-                let e = Foundation.log10(Swift.abs(spec.gettaOrder))
-                let text = Swift.abs(e - e.rounded()) < 1e-9 ? "%G%Q180%A10^\(Int(e.rounded()))@" : "%G%Q180%A\(Fitting.format(spec.gettaOrder))"
-                let lay = TextLayoutEngine.layout(text, latin: spec.font, japanese: jp, color: spec.labelColor, environment: env)
-                var p = CGPoint.zero
+            // 倍率(ゲタ): 桁の多い軸は数字を 10^n で割って書き、[×10^n] を添える。
+            // 「はみ出た桁を書く」を外すと、割った数字のまま [×10^n] は書かない
+            if spec.drawGetta, let e = fr.scales[axis].gettaExponent {
+                let lay = TextLayoutEngine.layout("[%G%Q180%A10^\(e)@]", latin: spec.font, japanese: jp, color: spec.labelColor, environment: env)
+                let bw = lay.bounds.width, bh = lay.bounds.height
+                let mine = boxes.filter { $0.axis == axis }.map { r in (minX: Double(r.rect.minX), maxX: Double(r.rect.maxX), minY: Double(r.rect.minY), maxY: Double(r.rect.maxY)) }
+                var x = 0.0, y = 0.0  // 文字の左下(y 下向き)
                 switch side {
-                case 0: p = CGPoint(x: fr.width - lay.bounds.width, y: Double(origin.y) + 100 + lay.bounds.height * 2.2)
-                case 1: p = CGPoint(x: 0, y: -150)
-                case 2: p = CGPoint(x: fr.width - lay.bounds.width, y: -100 - lay.bounds.height * 1.2)
-                default: p = CGPoint(x: fr.width - lay.bounds.width, y: -150)
+                case 0:  // 下: 右端にそろえて数字の下
+                    x = fr.width - bw
+                    y = (mine.map(\.maxY).max() ?? Double(origin.y) + gap) + 100 + bh
+                case 2:  // 上: 右端にそろえて数字の上
+                    x = fr.width - bw
+                    y = (mine.map(\.minY).min() ?? -gap) - 100
+                case 1:  // 左: いちばん左の数字のさらに左、いちばん上の数字より半行下
+                    x = (mine.map(\.minX).min() ?? -gap) - 200 - bw
+                    y = mine.min(by: { $0.minY < $1.minY }).map { $0.maxY + ($0.maxY - $0.minY) / 2 } ?? 0
+                default:  // 右: いちばん右の数字のすぐ右、いちばん上の数字より半行下
+                    x = (mine.map(\.maxX).max() ?? fr.width + gap) + 100
+                    y = mine.min(by: { $0.minY < $1.minY }).map { $0.maxY + ($0.maxY - $0.minY) / 2 } ?? 0
                 }
-                if let ctx { drawLayout(lay, at: p, angle: 0, ctx: ctx) }
+                if let ctx { drawLayout(lay, at: CGPoint(x: x - lay.bounds.minX, y: y + lay.bounds.minY), angle: 0, ctx: ctx) }
             }
         }
         return boxes
@@ -423,15 +451,42 @@ public final class GraphRenderer {
         ctx.scaleBy(x: 1, y: -1)
         ctx.textMatrix = .identity
         if opaque {
+            // 下地は文字のかたまりごとに、その字の枠だけを塗る(2 行の文字で、1 行目の幅の下にある 2 行目の右の点や線は隠さない)
             ctx.setFillColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 1))
-            ctx.fill(lay.bounds.insetBy(dx: -20, dy: -10))
+            for r in lay.runs {
+                guard case .glyphs = r.content, r.width > 0 else { continue }
+                ctx.fill(CGRect(x: r.origin.x, y: r.origin.y - r.descent, width: r.width, height: r.ascent + r.descent))
+            }
         }
         for r in lay.runs {
             switch r.content {
             case .glyphs(let line):
                 ctx.setFillColor(cg(r.color))
-                ctx.textPosition = r.origin
-                CTLineDraw(line, ctx)
+                if options.textAsPaths {
+                    // 字形の輪郭を塗る(書き出した先に同じ書体が無くても形が変わらない)
+                    let path = CGMutablePath()
+                    for run in (CTLineGetGlyphRuns(line) as? [CTRun]) ?? [] {
+                        let n = CTRunGetGlyphCount(run)
+                        guard n > 0 else { continue }
+                        let attrs = CTRunGetAttributes(run) as NSDictionary
+                        guard let fontRef = attrs[kCTFontAttributeName as String] else { continue }
+                        let font = fontRef as! CTFont
+                        var glyphs = [CGGlyph](repeating: 0, count: n)
+                        var pos = [CGPoint](repeating: .zero, count: n)
+                        CTRunGetGlyphs(run, CFRange(location: 0, length: n), &glyphs)
+                        CTRunGetPositions(run, CFRange(location: 0, length: n), &pos)
+                        let m = CTRunGetTextMatrix(run)
+                        for k in 0..<n {
+                            var t = m.concatenating(CGAffineTransform(translationX: r.origin.x + pos[k].x, y: r.origin.y + pos[k].y))
+                            if let g = CTFontCreatePathForGlyph(font, glyphs[k], &t) { path.addPath(g) }
+                        }
+                    }
+                    ctx.addPath(path)
+                    ctx.fillPath()
+                } else {
+                    ctx.textPosition = r.origin
+                    CTLineDraw(line, ctx)
+                }
             case .marker(let s, let curve, let length, let size):
                 ctx.saveGState()
                 let y = r.origin.y
@@ -478,22 +533,26 @@ public final class GraphRenderer {
 
     public func textLayout(_ t: TextObject, env: TextEnvironment) -> TextLayout {
         TextLayoutEngine.layout(t.text, latin: t.latinFont, japanese: t.japaneseFont, color: t.color, environment: env)
+            .aligned(t.alignment)
     }
 
     /// 矢印・枠の端の点(グラフの中の座標)
     public static func shapePoints(_ s: ShapeObject, _ fr: Frame) -> (CGPoint, CGPoint)? {
+        // 絶対位置: mm の値は用紙の左上から。グラフの変換(位置と拡大率)を打ち消す
+        let g = fr.graph
+        let z = g.zoomFactor
         func cx(_ v: Double) -> Double? {
             switch s.xReference {
             case 1: return fr.px(v, axis: 0)
             case 2: return fr.px(v, axis: 2)
-            default: return v * 100
+            default: return s.absolutePosition ? (v * 100 - Double(g.left)) / z : v * 100
             }
         }
         func cy(_ v: Double) -> Double? {
             switch s.yReference {
             case 1: return fr.py(v, axis: 1)
             case 2: return fr.py(v, axis: 3)
-            default: return v * 100
+            default: return s.absolutePosition ? (v * 100 - Double(g.top)) / z : v * 100
             }
         }
         guard let a = cx(s.x1), let b = cy(s.y1), let c = cx(s.x2), let d = cy(s.y2) else { return nil }
@@ -538,8 +597,15 @@ public final class GraphRenderer {
         }
     }
 
-    /// 図の範囲(グラフの中の座標。x1・y1 が左上、x2・y2 が右下)
+    /// 図の範囲(グラフの中の座標)。x1・y1 が左上で、大きさは info の表示の幅・高さ(絶対位置なら拡大率の影響を受けない)。
+    /// 古い形(info が 0 0 …)は x1・y1〜x2・y2
     public static func pictureRect(_ pic: PictureObject, _ fr: Frame) -> CGRect? {
+        if let size = pic.displaySize {
+            guard let (a, _) = shapePoints(pic.shape, fr) else { return nil }
+            let z = pic.shape.absolutePosition ? fr.graph.zoomFactor : 1
+            let r = CGRect(x: a.x, y: a.y, width: size.width / z, height: size.height / z)
+            return r.minX.isFinite && r.minY.isFinite ? r : nil
+        }
         guard let (a, b) = shapePoints(pic.shape, fr) else { return nil }
         let r = CGRect(x: Swift.min(a.x, b.x), y: Swift.min(a.y, b.y), width: Swift.abs(b.x - a.x), height: Swift.abs(b.y - a.y))
         return r.minX.isFinite && r.minY.isFinite && r.width.isFinite && r.height.isFinite ? r : nil

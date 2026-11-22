@@ -112,6 +112,37 @@ extension Graph {
 }
 
 public enum GraphOps {
+    /// 共通にした反対側の軸(U・R)に写す値(開くときに写すものと同じ)
+    /// (From・To・目盛の間隔・副目盛の分割数・目盛の付け方・自動・主目盛・副目盛。フォントや数字の書き方は写さない)
+    public static func copyCommonAxisSettings(from a: AxisSpec, to o: inout AxisSpec) {
+        o.from = a.from; o.to = a.to; o.increment = a.increment
+        o.division = a.division; o.scaleType = a.scaleType; o.autoStep = a.autoStep
+        o.major = a.major; o.minor = a.minor
+    }
+
+    /// U・R 軸を X・Y 軸と共通にしていれば、写す値をそろえる
+    public static func syncCommonAxes(_ g: inout Graph) {
+        for base in 0..<2 where g.axes[base].commonWithOpposite {
+            copyCommonAxisSettings(from: g.axes[base], to: &g.axes[base + 2])
+        }
+    }
+
+    /// 他のグラフとリンク: グラフ source の軸 axis の範囲(From・To・目盛の間隔・副目盛の分割数・目盛の付け方・自動)を、
+    /// ほかのグラフの同じ軸に入れる。そのグラフで反対側の軸を共通にしていれば、反対側にも入れる
+    public static func applyLinkedAxis(_ p: inout SMPProject, from source: Int, axis: Int) {
+        guard p.graphs.indices.contains(source), (0..<4).contains(axis) else { return }
+        let a = p.graphs[source].axes[axis]
+        func copy(_ b: inout AxisSpec) {
+            b.from = a.from; b.to = a.to; b.increment = a.increment
+            b.division = a.division; b.scaleType = a.scaleType; b.autoStep = a.autoStep
+        }
+        let base = axis % 2, opposite = axis < 2 ? axis + 2 : axis - 2
+        for j in p.graphs.indices where j != source {
+            copy(&p.graphs[j].axes[axis])
+            if p.graphs[j].axes[base].commonWithOpposite { copy(&p.graphs[j].axes[opposite]) }
+        }
+    }
+
     /// Clear Scale: データの範囲に合わせて軸を設定し直す(Auto step が外れていれば From・To だけ)
     public static func clearScale(_ p: inout SMPProject, graphIndex gi: Int, axes: [Int]) {
         guard gi < p.graphs.count else { return }

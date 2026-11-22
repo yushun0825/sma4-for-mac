@@ -6,7 +6,8 @@ import Sma4Core
 extension GraphWindowController {
     static let objectPasteboardType = NSPasteboard.PasteboardType("io.github.yushun0825.sma4mac.object")
     static let maxGraphs = 50
-    static let maxSeries = 40
+    /// 1 つのグラフに開けるデータファイルの数(50 個あると開く前に断る)
+    static let maxSeries = 50
 
     var gi: Int { doc?.activeGraphIndex ?? 0 }
 
@@ -223,6 +224,18 @@ extension GraphWindowController {
         do { try data.write(to: url) } catch { MessageBox.show("File write error!\n\(error.localizedDescription)", title: "Error") }
     }
 
+    /// 拡張メタファイル(Office などに貼れる線と面の図。文字は輪郭の図形になる)
+    @objc func exportEMF(_ sender: Any?) {
+        guard let (r, rect) = exportRenderer() else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = exportBaseName() + ".emf"
+        panel.allowedContentTypes = [UTType(filenameExtension: "emf") ?? .data]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let data = MetafileExport.emfData(renderer: r, rect: rect)
+        guard !data.isEmpty else { MessageBox.show("EMF を作れませんでした。", title: "Error"); return }
+        do { try data.write(to: url) } catch { MessageBox.show("File write error!\n\(error.localizedDescription)", title: "Error") }
+    }
+
     func exportBaseName() -> String {
         guard let doc else { return "Graph" }
         return (doc.fileDisplayName as NSString).deletingPathExtension
@@ -247,7 +260,7 @@ extension GraphWindowController {
     @objc func openDataFile(_ sender: Any?) {
         guard let doc, let g = doc.activeGraph else { return }
         guard g.series.count < GraphWindowController.maxSeries else {
-            MessageBox.show("\(GraphWindowController.maxSeries)個以上のファイルは開けません", title: "エラー"); return
+            MessageBox.show("\(GraphWindowController.maxSeries) 個を超えるファイルは開けません", title: "エラー"); return
         }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = []
@@ -337,11 +350,12 @@ extension GraphWindowController {
         let oldIDs = g.series.map(\.id)
         doc.update(r.series.count < g.series.count ? "データファイルを閉じる" : "Update") { p in
             p.graphs[graphIndex].series = r.series
-            // Data Mask の番号を付け直す
+            // Data Mask の対象の番号を付け直す(すべての系列のマスクはそのまま。閉じた系列のマスクは消す)
             let newIndex = Dictionary(uniqueKeysWithValues: r.series.enumerated().map { ($0.element.id, $0.offset) })
             p.graphs[graphIndex].masks = p.graphs[graphIndex].masks.compactMap { m in
-                guard m.seriesIndex < oldIDs.count, let n = newIndex[oldIDs[m.seriesIndex]] else { return nil }
-                var mm = m; mm.seriesIndex = n; return mm
+                guard let old = m.seriesIndex else { return m }
+                guard old < oldIDs.count, let n = newIndex[oldIDs[old]] else { return nil }
+                var mm = m; mm.target = n + 1; return mm
             }
             GraphOps.pruneData(&p)
         }
@@ -458,7 +472,7 @@ extension GraphWindowController {
     @objc func dataMask(_ sender: Any?) {
         guard let doc, let g = doc.activeGraph, !g.series.isEmpty else { return }
         if !g.masks.isEmpty {
-            guard let choice = DataDialogs.maskChoice(masks: g.masks, names: g.series.map(\.displayName), over: window) else { return }
+            guard let choice = DataDialogs.maskChoice(masks: g.masks, over: window) else { return }
             if case .delete(let i) = choice {
                 doc.update(graph: gi, "Data Mask の削除") { $0.masks.remove(at: i) }
                 return
@@ -475,16 +489,19 @@ extension GraphWindowController {
         let a = CGPoint(x: r.minX, y: r.minY).applying(t), b = CGPoint(x: r.maxX, y: r.maxY).applying(t)
         let fr = GraphRenderer.Frame(g)
         let names = g.series.map { DataDialogs.managerTitle($0) }
-        guard let sel = ListDialogs.chooseMany(title: "Select files for data masking", items: names,
-                                               selected: IndexSet(g.series.indices), over: window), !sel.isEmpty else { return }
+        // 1 つの系列を選ぶか、All ですべての系列(対象 0)にかける
+        guard let choice = ListDialogs.chooseMaskTarget(items: names, over: window) else { return }
         doc.update(graph: gi, "Data Mask") { graph in
-            for si in sel where graph.masks.count < 20 {
-                let s = graph.series[si]
-                let h = graph.horizontalAxisIndex(for: s), v = graph.verticalAxisIndex(for: s)
-                let x0 = fr.scales[h].value(atFraction: Double(a.x) / fr.width), x1 = fr.scales[h].value(atFraction: Double(b.x) / fr.width)
-                let y0 = fr.scales[v].value(atFraction: 1 - Double(b.y) / fr.height), y1 = fr.scales[v].value(atFraction: 1 - Double(a.y) / fr.height)
-                graph.masks.append(DataMask(seriesIndex: si, xMin: min(x0, x1), xMax: max(x0, x1), yMin: min(y0, y1), yMax: max(y0, y1)))
+            guard graph.masks.count < 20 else { return }
+            // 値への直し方は、選んだ系列ならその系列の軸、すべての系列なら X 軸と Y 軸
+            var h = 0, v = 1, target = DataMask.allSeries
+            if case .series(let si) = choice, si < graph.series.count {
+                h = graph.horizontalAxisIndex(for: graph.series[si]); v = graph.verticalAxisIndex(for: graph.series[si])
+                target = si + 1
             }
+            let x0 = fr.scales[h].value(atFraction: Double(a.x) / fr.width), x1 = fr.scales[h].value(atFraction: Double(b.x) / fr.width)
+            let y0 = fr.scales[v].value(atFraction: 1 - Double(b.y) / fr.height), y1 = fr.scales[v].value(atFraction: 1 - Double(a.y) / fr.height)
+            graph.masks.append(DataMask(target: target, xMin: min(x0, x1), xMax: max(x0, x1), yMin: min(y0, y1), yMax: max(y0, y1)))
         }
     }
 
@@ -660,8 +677,14 @@ extension GraphWindowController {
 
     func showAxis(_ index: Int, startPage: Int = 0) {
         guard let doc, let g = doc.activeGraph,
-              let ng = GraphDialogs.axis(index, graph: g, over: window, startPage: startPage) else { return }
-        doc.update(graph: gi, ["X-Axis", "Y-Axis", "U-Axis", "R-Axis"][index]) { $0 = ng }
+              let r = GraphDialogs.axis(index, graph: g, linked: doc.project.axisLinked(index), over: window, startPage: startPage) else { return }
+        let graphIndex = gi
+        doc.update(["X-Axis", "Y-Axis", "U-Axis", "R-Axis"][index]) { p in
+            p.graphs[graphIndex] = r.graph
+            p.setAxisLinked(index, r.linked)
+            // 他のグラフとリンク: 範囲をほかのグラフの同じ軸にも入れる
+            if r.linked { GraphOps.applyLinkedAxis(&p, from: graphIndex, axis: index) }
+        }
     }
 
     @objc func clearAllScale(_ sender: Any?) {
@@ -837,11 +860,14 @@ extension GraphWindowController {
         let env = renderer.environment(for: gi)
         let items = selectedTexts()
         guard items.count >= 2 else { return }
+        // 見えている文字の左端・右端(揃えによって位置の点からずれる)
         var spans: [UUID: (CGFloat, CGFloat)] = [:]
+        var offsets: [UUID: CGFloat] = [:]
         for item in items {
             if case .text(let t) = item.object {
-                let w = renderer.textLayout(t, env: env).bounds.width
-                spans[item.id] = (CGFloat(t.x), CGFloat(t.x) + w)
+                let b = renderer.textLayout(t, env: env).bounds
+                spans[item.id] = (CGFloat(t.x) + b.minX, CGFloat(t.x) + b.maxX)
+                offsets[item.id] = b.minX
             }
         }
         let lefts = spans.values.map(\.0), rights = spans.values.map(\.1)
@@ -854,11 +880,11 @@ extension GraphWindowController {
         doc.update(graph: gi, "位置あわせ") { graph in
             for (k, item) in graph.objects.enumerated() {
                 guard let span = spans[item.id], case .text(var t) = item.object else { continue }
-                let w = span.1 - span.0
+                let w = span.1 - span.0, off = offsets[item.id] ?? 0
                 switch tag {
-                case 1: t.x = Int(target - w / 2)
-                case 2: t.x = Int(target - w)
-                default: t.x = Int(target)
+                case 1: t.x = Int(target - w / 2 - off)
+                case 2: t.x = Int(target - w - off)
+                default: t.x = Int(target - off)
                 }
                 graph.objects[k].object = .text(t)
             }
@@ -1146,32 +1172,33 @@ extension GraphWindowController {
 
     @objc func aboutDLL(_ sender: Any?) {
         MessageBox.show("そのほかの解析では、次のことができます。\n"
-                        + ExtensionAnalysis.allCases.map(\.menuTitle).joined(separator: "\n")
+                        + ExtensionAnalysis.menuCases.map(\.menuTitle).joined(separator: "\n")
                         , title: "そのほかの解析について")
     }
 
     /// 特殊処理(Gaussian fitting など)。tag は ExtensionAnalysis の並びの番号
     @objc func extensionAnalysis(_ sender: Any?) {
         let tag = (sender as? NSMenuItem)?.tag ?? 0
-        guard tag < ExtensionAnalysis.allCases.count, let doc, let g = doc.activeGraph else { return }
-        let a = ExtensionAnalysis.allCases[tag]
+        guard tag < ExtensionAnalysis.menuCases.count, let doc, let g = doc.activeGraph else { return }
+        let a = ExtensionAnalysis.menuCases[tag]
         guard let si = chooseSeries("「\(a.menuTitle)」に使うデータを選ぶ", where: { $0.kind != .function }) else { return }
         let data = doc.plotData()[gi][si]
         var s = g.series[si]
-        if a.usesFittingDialog {
+        if a.usesFittingDialog || a == .peakDetect {
+            // Gaussian・Lorentzian は Fitting Cond. のあとに描き方、Peak Detect は描き方だけ
             s = prepareCurve(s, kind: .extension1, graph: g, data: data)
-            let pts = data.finitePoints
-            var f = s.extensionAnalysis == a ? s.peakFit : PeakFitSettings.initialGuess(x: pts.map(\.0), y: pts.map(\.1), count: s.peakFit.count)
-            guard let nf = AnalysisDialogs.fittingCondition(f, over: window) else { return }
-            f = nf
-            s.peakFit = f
+            if a.usesFittingDialog {
+                let pts = data.finitePoints
+                var f = s.extensionAnalysis == a ? s.peakFit : PeakFitSettings.initialGuess(x: pts.map(\.0), y: pts.map(\.1), count: s.peakFit.count)
+                guard let nf = AnalysisDialogs.fittingCondition(f, over: window) else { return }
+                f = nf
+                s.peakFit = f
+            }
             s.extensionAnalysis = a
             guard let ns = AnalysisDialogs.leastSquares(series: s, over: window) else { return }
             s = ns
         } else {
-            s.kind = .extension1
-            s.kindRaw = Series.Kind.extension1.rawValue
-            s.extensionAnalysis = a
+            s.extensionAnalysis = a   // 種類(8・9)と 1 行目の名前もここで決まる
             if a == .smoothing { CurvePage.applyDefaults(&s) }
         }
         let final = s
@@ -1205,9 +1232,10 @@ extension GraphWindowController {
         guard let doc, let si = chooseSeries("消去する最小二乗、スプラインの選択",
                                              where: { ($0.kind.hasCurve && $0.kind != .function) || $0.extensionAnalysis != nil }) else { return }
         doc.update(graph: gi, "Clear") {
+            $0.series[si].extensionAnalysis = nil
             $0.series[si].kind = .normal
             $0.series[si].kindRaw = 0
-            $0.series[si].extensionAnalysis = nil
+            $0.series[si].option = ""
         }
     }
 
@@ -1224,7 +1252,7 @@ extension GraphWindowController {
         if let t = target { editFunction(t); return }
         guard let expr = ListDialogs.input(title: "描画関数の入力", prompt: "式:", text: "sin(x)", over: window),
               !expr.trimmingCharacters(in: .whitespaces).isEmpty else { return }
-        do { _ = try Expression(expr) } catch {
+        do { _ = try Expression(Expression.body(expr, assigning: "y")) } catch {
             MessageBox.show("失敗しました\n\((error as? ExpressionError)?.message ?? "")", title: "Result", style: .warning); return
         }
         var name = "CALC.DAT"
@@ -1399,14 +1427,68 @@ final class RegionMenuHandler: NSObject {
 }
 
 /// グラフの保存の窓の下に付けるもの(「SMP にデータも入れる」「16 ビット版の形式で保存する」)
+/// マクロの「Print」を、実行が終わってから 1 回だけ行うための印
+private final class MacroPrintFlag { var requested = false }
+
+extension GraphWindowController {
+    /// マクロ(.smd)を実行する。命令の意味は MacroRunner を見る。
+    /// 読めない行があればそこで止め、それまでに実行したものは残す
+    @objc func runMacro(_ sender: Any?) {
+        guard let doc else { return }
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [UTType(filenameExtension: "smd") ?? .plainText, .plainText]
+        panel.allowsOtherFileTypes = true
+        panel.message = "実行するマクロ(*.smd)を選んでください。"
+        guard panel.runModal() == .OK, let url = panel.url, let raw = try? Data(contentsOf: url) else { return }
+        let text = Sma4TextEncoding.decodeSMP(raw)
+        let folder = url.deletingLastPathComponent()
+        // Windows のパス(C:\…)は、マクロと同じフォルダのファイル名でも探す
+        func locate(_ path: String) -> URL? {
+            let posix = path.replacingOccurrences(of: "\\", with: "/")
+            var cands: [URL] = []
+            if posix.hasPrefix("/") { cands.append(URL(fileURLWithPath: posix)) }
+            if !posix.contains(":") { cands.append(folder.appendingPathComponent(posix)) }
+            cands.append(folder.appendingPathComponent((posix as NSString).lastPathComponent))
+            return cands.first { FileManager.default.fileExists(atPath: $0.path) }
+        }
+        let printFlag = MacroPrintFlag()
+        let io = MacroRunner.IO(
+            readData: { path in
+                guard let u = locate(path), let d = try? Data(contentsOf: u) else { return nil }
+                return DataImport.dataFile(name: u.lastPathComponent, contents: d, timestamp: SMPWriter.timestamp(Date()))
+            },
+            openSMP: { path in
+                guard let u = locate(path), let d = try? Data(contentsOf: u),
+                      var p = try? SMPReader.read(data: d, fileName: u.lastPathComponent) else { return nil }
+                Sma4Document.loadMissingData(&p, baseURL: u)
+                return p
+            },
+            print: { _ in printFlag.requested = true },
+            pause: { line in MessageBox.confirm("\(line) 行目で止めました。続けますか?", title: "マクロ") })
+        var runner = MacroRunner(project: doc.project, graphIndex: gi)
+        var failure: String?
+        do { try runner.run(text, io: io) } catch {
+            failure = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+        }
+        let result = runner.project
+        doc.update("マクロ") { $0 = result }
+        doc.activeGraphIndex = min(runner.graphIndex, max(doc.project.graphs.count - 1, 0))
+        if let failure { MessageBox.show(failure, title: "マクロ") }
+        if printFlag.requested { printGraphs(nil) }
+    }
+}
+
 @MainActor
 enum SaveAccessory {
-    static func make() -> (NSView, () -> Bool) {
+    /// 保存の窓の下の「SMP にデータも入れる」と「16 ビット版の形式で保存する」(ver. 1.5)。16bit は保存 1 回ごとに選ぶ
+    static func make(sixteenBit: ((Bool) -> Void)? = nil) -> (NSView, () -> Bool) {
         let v = TemplateView(.saveOptions)
         v.setChecked(787, AppSettings.shared.saveDataWithGraph)
         v.setChecked(788, false)
-        v.setEnabled(788, false)
+        v.setEnabled(788, sixteenBit != nil)
         v.on(787) { AppSettings.shared.saveDataWithGraph = v.isChecked(787) }
+        v.on(788) { sixteenBit?(v.isChecked(788)) }
+        sixteenBit?(false)
         return (v, { v.isChecked(787) })
     }
 }

@@ -93,8 +93,11 @@ final class Sma4Document: NSDocument {
                 }
             }
         }
-        return SMPWriter.data(for: p)
+        return saveSixteenBit ? SMPWriter.data16(for: p) : SMPWriter.data(for: p)
     }
+
+    /// 次の保存を 16bit 形式(ver. 1.5)で書く(保存の窓で選んだときだけ。保存が終われば戻す)
+    var saveSixteenBit = false
 
     override func prepareSavePanel(_ savePanel: NSSavePanel) -> Bool {
         if fileURL == nil {
@@ -104,14 +107,17 @@ final class Sma4Document: NSDocument {
         savePanel.allowsOtherFileTypes = false
         savePanel.isExtensionHidden = false
         // 保存の窓の下の「SMP にデータも入れる」
-        savePanel.accessoryView = SaveAccessory.make().0
+        savePanel.accessoryView = SaveAccessory.make(sixteenBit: { [weak self] on in self?.saveSixteenBit = on }).0
         return true
     }
 
     override func save(to url: URL, ofType typeName: String, for saveOperation: NSDocument.SaveOperationType,
                        completionHandler: @escaping (Error?) -> Void) {
         super.save(to: url, ofType: typeName, for: saveOperation) { error in
-            if error == nil { MainActor.assumeIsolated { AppSettings.shared.noteRecent(url.path) } }
+            MainActor.assumeIsolated {
+                if error == nil { AppSettings.shared.noteRecent(url.path) }
+                self.saveSixteenBit = false
+            }
             completionHandler(error)
         }
     }

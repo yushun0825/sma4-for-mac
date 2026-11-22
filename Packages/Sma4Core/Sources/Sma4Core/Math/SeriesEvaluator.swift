@@ -85,7 +85,8 @@ public enum SeriesEvaluator {
             return Array(c.prefix(n))
         }
         func transform(_ expr: String, useX: Bool, xv: [Double], yv: [Double]) -> [Double]? {
-            let t = expr.trimmingCharacters(in: .whitespaces)
+            // 先頭の「y=」「x=」は除いて計算する(SMP の文字は変えない)
+            let t = Expression.body(expr, assigning: useX ? "x" : "y")
             if t.isEmpty || t.lowercased() == (useX ? "x" : "y") { return useX ? xv : yv }
             do {
                 let e = try Expression(t)
@@ -96,7 +97,7 @@ public enum SeriesEvaluator {
                 return nil
             }
         }
-        let needXTransform = s.transformX || s.kind == .function && s.expressionX.lowercased() != "x"
+        let needXTransform = s.transformX || s.kind == .function && Expression.body(s.expressionX, assigning: "x").lowercased() != "x"
         let needYTransform = s.transformY || s.kind == .function
         let tx = needXTransform ? (transform(s.expressionX, useX: true, xv: baseX, yv: baseY) ?? baseX) : baseX
         let ty = needYTransform ? (transform(s.expressionY, useX: false, xv: baseX, yv: baseY) ?? baseY) : baseY
@@ -133,15 +134,16 @@ public enum SeriesEvaluator {
         applyMasks(graph.masks, seriesIndex: index, to: &out)
 
         // 曲線
-        if s.kind.isLSQ || s.kind == .spline || s.kind == .extension1 {
+        if s.kind.isLSQ || s.kind == .spline || s.kind == .extension1 || s.kind == .extension2 {
             computeCurve(s, graph: graph, out: &out)
         }
         return out
     }
 
-    /// 系列 seriesIndex のマスクの範囲に入る点を欠損(NaN)にする。範囲外の番号のマスクは無視する
+    /// 系列 seriesIndex(0 始まり)に効くマスク(すべての系列のものと、その系列のもの)の範囲に入る点を欠損(NaN)にする。
+    /// どの系列にも当たらない番号のマスクは何もしない
     static func applyMasks(_ masks: [DataMask], seriesIndex: Int, to out: inout SeriesPlotData) {
-        let mine = masks.filter { $0.seriesIndex == seriesIndex }
+        let mine = masks.filter { $0.applies(toSeries: seriesIndex) }
         guard !mine.isEmpty else { return }
         let n = Swift.min(out.x.count, out.y.count)
         var masked = [Bool](repeating: false, count: n)
@@ -157,8 +159,15 @@ public enum SeriesEvaluator {
         out.masked = masked
     }
 
-    /// 連続データの X の並び
-    public static func curveSamples(_ s: Series, graph: Graph, dataRange: (Double, Double)? = nil) -> [Double] {
+    /// 連続データの X の並び(曲線の範囲の始めから終わりまで)。最小二乗・スプライン・任意関数に使う。
+    /// 終わりが始めより大きくなければ、終わりを始め + 1 として描く(SMPReader.normalizeCurveRanges と同じ決まり)
+    public static func curveSamples(_ s: Series, graph: Graph) -> [Double] {
+        let a = s.curveStart
+        return samples(s, from: a, to: s.curveEnd > a ? s.curveEnd : a + 1)
+    }
+
+    /// 特殊処理の曲線の X の並び。範囲が決まっていなければ(始め = 終わり)データの範囲、データが無ければ横軸の範囲
+    static func extensionSamples(_ s: Series, graph: Graph, dataRange: (Double, Double)?) -> [Double] {
         var a = s.curveStart, b = s.curveEnd
         if a == b {
             if let r = dataRange { a = r.0; b = r.1 } else {
@@ -167,6 +176,11 @@ public enum SeriesEvaluator {
                 if ax.scaleType.isInverse { a = ax.from == 0 ? 0 : 1 / ax.from; b = ax.to == 0 ? 0 : 1 / ax.to }
             }
         }
+        return samples(s, from: a, to: b)
+    }
+
+    /// a から b までを、系列の分割数と刻み方(等間隔・指数・逆数)で分けた X の並び
+    static func samples(_ s: Series, from a: Double, to b: Double) -> [Double] {
         let n = Swift.min(Swift.max(s.curveDivisions, 2), 20000)
         switch s.curveSpacing {
         case .exponential where a > 0 && b > 0:
@@ -199,17 +213,19 @@ public enum SeriesEvaluator {
                 let fit = try Fitting.polynomial(x: xs, y: ys, order: s.lsqOrder,
                                                  passThrough: s.passThroughPoint ? (s.passX, s.passY) : nil)
                 out.fit = fit
-                let sx = curveSamples(s, graph: graph, dataRange: range)
+                let sx = curveSamples(s, graph: graph)
                 out.curve = zip(sx, fit.evaluate(sx)).map { (x: $0.0, y: $0.1) }
             case .expLSQ, .logLSQ, .powerLSQ:
+                // 特定点を通す指定は、多項式と同じく指数・対数・べき乗にも効く(直線にした座標で通す)
+                let through = s.passThroughPoint ? (s.passX, s.passY) : nil
                 let fit: FitResult
                 switch s.kind {
-                case .expLSQ: fit = try Fitting.exponential(x: xs, y: ys)
-                case .logLSQ: fit = try Fitting.logarithmic(x: xs, y: ys)
-                default: fit = try Fitting.power(x: xs, y: ys)
+                case .expLSQ: fit = try Fitting.exponential(x: xs, y: ys, passThrough: through)
+                case .logLSQ: fit = try Fitting.logarithmic(x: xs, y: ys, passThrough: through)
+                default: fit = try Fitting.power(x: xs, y: ys, passThrough: through)
                 }
                 out.fit = fit
-                let sx = curveSamples(s, graph: graph, dataRange: range)
+                let sx = curveSamples(s, graph: graph)
                 out.curve = zip(sx, fit.evaluate(sx)).map { (x: $0.0, y: $0.1) }
             case .generalLSQ:
                 let initial = initialParameters(s.generalParameterLine)
@@ -217,22 +233,22 @@ public enum SeriesEvaluator {
                                               initial: initial, constants: ExprContext.constantsDictionary(graph.constants),
                                               fixed: s.generalFixed, tolerancePercent: s.generalTolerance)
                 out.fit = fit
-                let sx = curveSamples(s, graph: graph, dataRange: range)
+                let sx = curveSamples(s, graph: graph)
                 out.curve = zip(sx, fit.evaluate(sx)).map { (x: $0.0, y: $0.1) }
             case .spline:
-                let mode = Spline.Mode(rawValue: s.lsqOrder) ?? .cubic
+                guard let mode = Spline.Mode(rawValue: s.lsqOrder) else { break }  // 0〜2 以外は描かない
                 let logX = hAxis.scaleType.isLog, logY = vAxis.scaleType.isLog
                 let fx = logX ? xs.map { $0 > 0 ? Foundation.log10($0) : .nan } : xs
                 let fy = logY ? ys.map { $0 > 0 ? Foundation.log10($0) : .nan } : ys
-                var samples = curveSamples(s, graph: graph, dataRange: range)
+                var samples = curveSamples(s, graph: graph)
                 if logX { samples = samples.map { $0 > 0 ? Foundation.log10($0) : .nan } }
                 let c = Spline.curve(x: fx, y: fy, mode: mode, samples: samples, divisions: s.curveDivisions)
                 out.curve = c.map { p in
                     (x: logX ? Foundation.pow(10, p.0) : p.0, y: logY ? Foundation.pow(10, p.1) : p.1)
                 }
-            case .extension1:
+            case .extension1, .extension2:
                 guard let a = s.extensionAnalysis else { break }
-                let samples = a.usesFittingDialog ? curveSamples(s, graph: graph, dataRange: range) : []
+                let samples = a.usesFittingDialog ? extensionSamples(s, graph: graph, dataRange: range) : []
                 let r = try ExtensionAnalyzer.run(a, x: xs, y: ys, settings: s.peakFit, samples: samples)
                 out.resultLines = r.lines
                 out.curve = r.curve
@@ -246,27 +262,26 @@ public enum SeriesEvaluator {
         }
     }
 
-    /// 一般関数の初期値の行。1.4 までは "7 1 1 1 1 1 1 1 0"(個数と a〜g)。
-    /// 新しい形式は "%d %le …"(9 と 10 個の値: 1 つ目は許容誤差らしい値、そのあと a〜i)
-    public static func initialParameters(_ line: String) -> [String: Double] {
+    /// 一般関数の初期値の行「個数 許容誤差(%) a b … i」。古い形 "7 許容誤差 a〜g" も新しい形 "9 許容誤差 a〜i" もある。
+    /// 1 つ目の個数によらず、許容誤差のあとの 8 つ(a〜h)までを読み、i は読まない(いつも 0)。形が違えば nil
+    static func parameterLine(_ line: String) -> (tolerance: Double, values: [Double])? {
         let f = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).compactMap { Double($0) }
+        guard f.count >= 2, Int(exactly: f[0]) != nil else { return nil }
+        return (f[1], Array(f.dropFirst(2).prefix(8)))
+    }
+
+    /// 一般関数の初期値 a〜i。行に無い値と i は 0。行の形でなければ既定の行の値
+    public static func initialParameters(_ line: String) -> [String: Double] {
+        let p = parameterLine(line) ?? parameterLine(SMPWriter.defaultGeneralParameterLine)!
         var d: [String: Double] = [:]
-        if isVersion158ParameterLine(f) {
-            for (i, name) in ["a", "b", "c", "d", "e", "f", "g", "h", "i"].enumerated() { d[name] = f[i + 2] }
-            return d
-        }
-        guard f.count >= 2 else { return d }
-        for (i, name) in Fitting.parameterNames.enumerated() where i + 1 < f.count { d[name] = f[i + 1] }
+        for (k, name) in Fitting.parameterNames.enumerated() { d[name] = k < p.values.count ? p.values[k] : 0 }
         return d
     }
 
-    /// 新しい形式の初期値の行の 1 つ目の値(許容誤差 % と推定)。古い形式なら nil
+    /// 初期値の行の許容誤差(%)。行の形でなければ nil
     public static func parameterLineTolerance(_ line: String) -> Double? {
-        let f = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).compactMap { Double($0) }
-        return isVersion158ParameterLine(f) ? f[1] : nil
+        parameterLine(line)?.tolerance
     }
-
-    static func isVersion158ParameterLine(_ f: [Double]) -> Bool { f.count >= 11 && f[0] == 9 }
 
     /// 系列の X・Y の最小値と最大値(Clear Scale 用)
     public static func extent(_ data: [SeriesPlotData], series: [Series], axisIndex: Int, graph: Graph) -> (Double, Double)? {

@@ -155,7 +155,7 @@ struct FittingTests {
         #expect(p["b"] == 0.5)
         let best = zip(xs, ys).reduce(0) { $0 + $1.1 * exp(0.5 * $1.0) } / xs.reduce(0) { $0 + exp($1) }
         #expect(abs((p["a"] ?? 0) - best) < 1e-9)
-        #expect(r.summary.contains("b = 0.5"))
+        #expect(r.summary.contains("\nb=5.00000000e-01\n"))
         // 正しい b で固定すれば a も正しい。許容誤差(%)を付けても収束する
         let r2 = try Fitting.general(x: xs, y: ys, function: "a*exp(b*x)", initial: ["a": 1, "b": 0.8],
                                      fixed: ["b"], tolerancePercent: 0.001)
@@ -167,10 +167,12 @@ struct FittingTests {
 
         // 系列の設定から: 新しい形式の初期値の行(9 と 10 個の値)と generalFixed
         let line158 = "9 2.000000e-02 1.000000e+00 5.000000e-01 0.000000e+00 0.000000e+00 0.000000e+00 0.000000e+00 0.000000e+00 3.000000e+00 4.000000e+00"
-        #expect(SeriesEvaluator.initialParameters(line158) == ["a": 1, "b": 0.5, "c": 0, "d": 0, "e": 0, "f": 0, "g": 0, "h": 3, "i": 4])
+        // a〜h の 8 つまでを読み、i は読まない(いつも 0)
+        #expect(SeriesEvaluator.initialParameters(line158) == ["a": 1, "b": 0.5, "c": 0, "d": 0, "e": 0, "f": 0, "g": 0, "h": 3, "i": 0])
         #expect(SeriesEvaluator.parameterLineTolerance(line158) == 0.02)
-        #expect(SeriesEvaluator.initialParameters("7 1 2 3 4 5 6 7 0") == ["a": 1, "b": 2, "c": 3, "d": 4, "e": 5, "f": 6, "g": 7])
-        #expect(SeriesEvaluator.parameterLineTolerance("7 1 2 3 4 5 6 7 0") == nil)
+        // 古い形式も「個数 許容誤差 a b …」
+        #expect(SeriesEvaluator.initialParameters("7 1 2 3 4 5 6 7 0") == ["a": 2, "b": 3, "c": 4, "d": 5, "e": 6, "f": 7, "g": 0, "h": 0, "i": 0])
+        #expect(SeriesEvaluator.parameterLineTolerance("7 1 2 3 4 5 6 7 0") == 1)
         var project = SMPProject()
         project.setDataFile(DataFile(name: "e.dat", lines: zip(xs, ys).map { "\($0) \($1)" }))
         var g = Graph.makeDefault()
@@ -221,7 +223,8 @@ struct ScaleTests {
         var a = AxisSpec()
         a.from = 0; a.to = 1.5; a.increment = 0.5
         let labels = AxisScale(a).ticks().filter(\.isMajor).compactMap(\.label)
-        #expect(labels == ["0", "0.5", "1.0", "1.5"])
+        // 小数部の桁数(5)で書いて末尾の 0 を消す
+        #expect(labels == ["0", "0.5", "1", "1.5"])
         a.from = 0; a.to = 1200; a.increment = 200
         // 3 桁区切りのコンマは付けない
         #expect(AxisScale(a).ticks().filter(\.isMajor).compactMap(\.label).last == "1200")

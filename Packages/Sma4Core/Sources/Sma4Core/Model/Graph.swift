@@ -64,7 +64,12 @@ public struct Series: Hashable, Sendable, Identifiable {
     public var tabAsSpace: Bool = false
     public var absoluteLineCount: Bool = false
     public var skipCommentCount: Bool = false
-    public var considerOutOfRange: Bool = false
+    /// グラフの範囲の外の点も使うか。SMP の値は 0 以外なら使う(0 と 1 以外の値もあるので、読んだ値をそのまま持つ)
+    public var considerOutOfRangeValue: Int = 0
+    public var considerOutOfRange: Bool {
+        get { considerOutOfRangeValue != 0 }
+        set { if newValue != (considerOutOfRangeValue != 0) { considerOutOfRangeValue = newValue ? 1 : 0 } }
+    }
 
     // 3 行目
     public var lineType: LineType = .none
@@ -107,25 +112,37 @@ public struct Series: Hashable, Sendable, Identifiable {
     public var curveWidth: Int = 40
     public var curveColor: SMPColor = .black
     public var curvePitch: Int = 300
-    public var curveVisible: Bool = true
+    /// 読んだときの曲線の線種・太さ・色・ピッチ(範囲の外の数があったときだけ)。変えていなければ、この数のまま書き戻す
+    public var curveStyleRaw: [String]? = nil
+    /// 9 行目の 5 個目はデータの表示/非表示(visible)。「表示/非表示切り替え」はこの値を変え、点も曲線も描かない
+    public var curveVisible: Bool {
+        get { visible }
+        set { visible = newValue }
+    }
 
     // 一般関数の最小二乗(種類 7)の式と初期値
     public var generalFunction: String = ""
-    public var generalDerivatives: [String] = Array(repeating: "", count: 7)
-    /// 初期値の行。古い形式は "7 a b c d e f g 0"、新しい形式は "9 (許容誤差?) a b c d e f g h i"
+    /// a〜i の偏微分(空なら数値で求める)
+    public var generalDerivatives: [String] = Array(repeating: "", count: 9)
+    /// 初期値の行 "9 許容誤差 a b c d e f g h i"(古い "7 許容誤差 a〜g" は読むときにこの形にする)
     public var generalParameterLine: String = ""
-    /// 動かさずに初期値のまま使うパラメータ("a"〜"g"。SMP には書かない)
+    /// 動かさずに初期値のまま使うパラメータ("a"〜"i")。SMP では偏微分の行の頭の "0|"(動かすものは "1|")
     public var generalFixed: Set<String> = []
+    /// 一般関数の定数の名前(SMP の偏微分の行の順)
+    public static let generalParameterNames = ["a", "b", "c", "d", "e", "f", "g", "h", "i"]
     /// 許容誤差(%)。各パラメータの相対変化がこれより小さくなったら止める(0 なら止めない。新しい形式の行から読むが、書くのは行のまま)
     public var generalTolerance: Double = 0.001
 
-    /// そのほかの解析。nil 以外にすると種類は .extension1(8)になり、nil に戻すと .normal に戻る。
+    /// 特殊処理。名前は 1 行目の 10 個目(option)に書く。nil 以外にすると種類は 8(最大値・最小値は 9)になり、
+    /// nil に戻すと .normal に戻る
     public var extensionAnalysis: ExtensionAnalysis? {
         didSet {
-            if extensionAnalysis != nil {
-                kind = .extension1; kindRaw = Kind.extension1.rawValue
-            } else if oldValue != nil, kind == .extension1 {
+            if let a = extensionAnalysis {
+                kind = a.seriesKind; kindRaw = a.seriesKind.rawValue
+                option = a.rawValue
+            } else if oldValue != nil, kind == .extension1 || kind == .extension2 {
                 kind = .normal; kindRaw = Kind.normal.rawValue
+                option = ""
             }
         }
     }
@@ -135,7 +152,7 @@ public struct Series: Hashable, Sendable, Identifiable {
     /// 読み取ったが意味のわからなかった行・値(書き戻すときに残す)
     public var extraLines: [String] = []
 
-    /// データの表示/非表示(SMP には残らない)
+    /// データの表示/非表示(9 行目の 5 個目)
     public var visible: Bool = true
 
     public init(name: String, path: String = "") {
@@ -150,7 +167,7 @@ public struct Series: Hashable, Sendable, Identifiable {
 
     /// 曲線(連続データ)を持つか。特殊処理は Gaussian・Lorentzian・Smothing が曲線を持つ
     public var hasCurve: Bool {
-        if kind == .extension1 { return extensionAnalysis?.producesCurve ?? false }
+        if kind == .extension1 || kind == .extension2 { return extensionAnalysis?.producesCurve ?? false }
         return kind.hasCurve
     }
 }
@@ -202,8 +219,20 @@ public struct AxisSpec: Hashable, Sendable {
     public var labelShiftX: Int = 0
     public var labelShiftY: Int = 0
     public var labelColor: SMPColor = .black
-    /// 2 行目の 10 個目以降(Sma4 では未使用とされている値)
+    /// 2 行目の 10 個目以降。12 個目は目盛変換を使うか(transformEnabled)
     public var line2Tail: [String] = ["300", "100", "0"]
+
+    /// 目盛変換: 目盛の位置はそのままで、数字だけを式で計算し直して書く(2 行目の 12 個目)。
+    /// 例: X 軸に x*2 とすると -2〜6 の数字が -4〜12 になる
+    public var transformEnabled: Bool {
+        get { line2Tail.count > 2 && (Int(line2Tail[2]) ?? 0) != 0 }
+        set {
+            while line2Tail.count < 3 { line2Tail.append(["300", "100", "0"][line2Tail.count]) }
+            line2Tail[2] = newValue ? "1" : "0"
+        }
+    }
+    /// 目盛変換の式(x が目盛の値)。副目盛の行の次の行に書く(使わないときは空行)
+    public var transformExpression: String = ""
 
     public var font: LogFont = .latinDefault()
     public var major = TickStyle(inside: true, outside: false, length: 300, width: 40, color: .black, pitch: 0, style: 1)
@@ -247,8 +276,12 @@ public struct TextObject: Hashable, Sendable {
     /// 1:透過 2:背景を白で塗る
     public var backgroundMode: Int = 1
     /// 位置を用紙の左上からにするか
+    /// 揃え(0 左・1 中央・2 右)。位置の点を 1 行ずつ左端・真ん中・右端にする
+    public var alignment: Int = 0
+    /// 位置を用紙の左上からの値で持つ(false ならグラフの左上から)
     public var absolutePosition: Bool = false
-    public var positionTail: [String] = ["0"]
+    /// 位置の行の 7 つ目より後ろ(意味の分からない値はそのまま残す)
+    public var positionTail: [String] = []
     /// 制御コードを含んだ文字列。改行は \n の 2 文字で持つ。
     public var text: String = ""
     public var latinFont: LogFont = .latinDefault()
@@ -299,6 +332,16 @@ public struct ShapeObject: Hashable, Sendable {
     public var headClose: Int = 100
     public var tail: [String] = ["0"]
 
+    /// 位置を用紙の左上から決める(19 個目の値が 1)。枠と図の「絶対位置設定」。
+    /// 位置が mm のときだけ効き、グラフの拡大率の影響を受けない
+    public var absolutePosition: Bool {
+        get { (Int(tail.first ?? "0") ?? 0) != 0 }
+        set {
+            if tail.isEmpty { tail = ["0"] }
+            tail[0] = newValue ? "1" : "0"
+        }
+    }
+
     public init() {}
 
     public var kind: Kind { Kind(rawValue: objectType) ?? .arrow }
@@ -332,9 +375,10 @@ public struct DotObject: Hashable, Sendable {
 public struct PictureObject: Hashable, Sendable {
     /// 図のファイル名(「パスを保存」が切ってあれば相対パス)
     public var path: String
-    /// 4 つの整数の行(意味は不明。新しく貼るときは newInfo を使う)
+    /// 4 つの整数の行「画素の幅 画素の高さ 表示の幅 表示の高さ(0.01 mm)」
     public var info: [Int]
-    /// 矢印・枠と同じ 19 個の値の行。x1・y1 が左上、x2・y2 が右下(枠と同じくグラフの枠の左上からの mm)
+    /// 矢印・枠と同じ 19 個の値の行。x1・y1 が図の左上(グラフの枠の左上からの mm。絶対位置なら用紙の左上から)。
+    /// x2・y2 は使わない
     public var shape: ShapeObject
 
     public init(path: String, info: [Int] = [0, 0, 0, 0], shape: ShapeObject = ShapeObject()) {
@@ -342,13 +386,27 @@ public struct PictureObject: Hashable, Sendable {
         self.info = info
         var s = shape
         s.objectType = PictureObject.objectType
+        s.shapeType = PictureObject.objectType   // 図の行の 10 個目は 10
         self.shape = s
     }
 
     public static let objectType = 10
 
-    /// 新しく貼る図の 4 つの整数(推定: 0 0 幅 高さ[ピクセル])
-    public static func newInfo(pixelWidth: Int, pixelHeight: Int) -> [Int] { [0, 0, pixelWidth, pixelHeight] }
+    /// Sma4 for Mac 2.2.1 までが書いた「0 0 画素の幅 画素の高さ」の形(大きさは x1・y1〜x2・y2)
+    public var isLegacyInfo: Bool { info.count >= 4 && info[0] == 0 && info[1] == 0 }
+
+    /// 表示の大きさ(0.01 mm)。古い形や値が無いときは nil
+    public var displaySize: (width: Double, height: Double)? {
+        guard !isLegacyInfo, info.count >= 4, info[2] > 0, info[3] > 0 else { return nil }
+        return (Double(info[2]), Double(info[3]))
+    }
+
+    /// 新しく貼る図の 4 つの整数。高さは幅と画素の縦横の比から決める
+    public static func newInfo(pixelWidth: Int, pixelHeight: Int, widthMM: Double) -> [Int] {
+        let w = Int((widthMM * 100).rounded())
+        let h = pixelWidth > 0 ? Int((widthMM * 100 * Double(pixelHeight) / Double(pixelWidth)).rounded()) : w
+        return [pixelWidth, pixelHeight, w, h]
+    }
 }
 
 public enum GraphObject: Hashable, Sendable {
@@ -389,6 +447,8 @@ public struct Graph: Hashable, Sendable, Identifiable {
     public var id = UUID()
     public var name: String = "Untitled.SMP"
     public var versionLine: String = " Sma4Win ver. 1.8  SMP file"
+    /// 読んだときの行(1.8 形式のとき)。変えていない値は読んだときの文字のまま書き戻すのに使う(グラフの中身の比べには入れない)
+    var source = SourceText()
     public var comment: String = ""
     public var page = PageSetup()
     public var series: [Series] = []
@@ -402,6 +462,25 @@ public struct Graph: Hashable, Sendable, Identifiable {
     public var frameType: FrameType = .box
     public var zeroCommon: Bool = false
     public var graphLine2Tail: [String] = ["0", "1", "0"]
+
+    /// %01N などのデータの番号を、表示しているデータだけで数える([GRAPH] の 2 行目の 5 個目が 0 のとき)。
+    /// ファイル名(%N)だけに効き、点の形(%E)には効かない
+    public var codesCountVisibleDataOnly: Bool {
+        get { graphLine2Tail.count > 1 && graphLine2Tail[1] == "0" }
+        set {
+            while graphLine2Tail.count < 2 { graphLine2Tail.append(["0", "1", "0"][graphLine2Tail.count]) }
+            graphLine2Tail[1] = newValue ? "0" : "1"
+        }
+    }
+
+    /// 対数の目盛の 10^0・10^1 を 1・10 と書く([GRAPH] の 2 行目の 6 個目。すべての軸に効く)
+    public var plainLogDecades: Bool {
+        get { graphLine2Tail.count > 2 && (Int(graphLine2Tail[2]) ?? 0) != 0 }
+        set {
+            while graphLine2Tail.count < 3 { graphLine2Tail.append(["0", "1", "0"][graphLine2Tail.count]) }
+            graphLine2Tail[2] = newValue ? "1" : "0"
+        }
+    }
     public var frameWidth: Int = 40
     public var frameColor: SMPColor = .black
     public var framePitch: Int = 0
@@ -413,6 +492,10 @@ public struct Graph: Hashable, Sendable, Identifiable {
     // [OTHERS]
     public var constants: [Double] = Array(repeating: 0, count: 9)
     public var othersFont: LogFont = .symbolDefault()
+    /// [OTHERS] の項目の数の行(読んだままの形)
+    public var othersCountLine: String = " 2"
+    /// [OTHERS] のフォント名のあとの行(SMP の場所などが入っていることがある。最後は空の行)
+    public var othersTailLines: [String] = [""]
 
     // [MASKS]
     /// Data Mask(最大 maxMasks 個)
@@ -446,11 +529,16 @@ public struct Graph: Hashable, Sendable, Identifiable {
             var a = axes[0]
             a.drawLabels = axes[2].drawLabels
             a.drawAxis = axes[2].drawAxis
+            // 目盛変換は共通にしても軸ごと
+            a.transformEnabled = axes[2].transformEnabled
+            a.transformExpression = axes[2].transformExpression
             return a
         case 3 where !rIndependent:
             var a = axes[1]
             a.drawLabels = axes[3].drawLabels
             a.drawAxis = axes[3].drawAxis
+            a.transformEnabled = axes[3].transformEnabled
+            a.transformExpression = axes[3].transformExpression
             return a
         default:
             return axes[index]
@@ -465,9 +553,27 @@ public struct DataFile: Hashable, Sendable {
     public var timestamp: String
     /// ファイルの行(改行を含まない)
     public var lines: [String]
+    /// SMP から読んだときの見出しの "]" より後ろ(読んだままの形)。読んだときの日時と行のままなら、そのまま書く
+    public var headerTail: String?
+    /// headerTail を読んだときの日時と行
+    var headerTailBasis: (timestamp: String, lines: [String])?
 
     public init(name: String, timestamp: String = "", lines: [String]) {
         self.name = name; self.timestamp = timestamp; self.lines = lines
+    }
+
+    public static func == (a: DataFile, b: DataFile) -> Bool {
+        a.name == b.name && a.timestamp == b.timestamp && a.lines == b.lines && a.headerTail == b.headerTail
+    }
+
+    public func hash(into h: inout Hasher) {
+        h.combine(name); h.combine(timestamp); h.combine(lines); h.combine(headerTail)
+    }
+
+    /// 読んだときのまま(日時も行も変わっていない)なら、読んだ見出しの後ろ
+    var unchangedHeaderTail: String? {
+        guard let t = headerTail, let basis = headerTailBasis, basis.timestamp == timestamp, basis.lines == lines else { return nil }
+        return t
     }
 }
 
@@ -476,8 +582,20 @@ public struct SMPProject: Hashable, Sendable {
     public var graphs: [Graph] = []
     /// データファイル名(大文字小文字を区別しない)→ 中身
     public var dataFiles: [String: DataFile] = [:]
-    /// 複数グラフを 1 ファイルにした SMA 形式で読んだか
+    /// 複数グラフを 1 ファイルにした SMA 形式の 2 行目(グラフの数の後ろ)。1〜4 個目は X・Y・U・R 軸の「他のグラフとリンク」
     public var multiGraphHeaderTail: [String] = ["0", "0", "0", "0", "100"]
+
+    /// 軸 i(0 X・1 Y・2 U・3 R)を他のグラフとリンクしているか。
+    /// 保存のときに書くが、開くときには読まない(開くといつも外れている)
+    public func axisLinked(_ i: Int) -> Bool {
+        i >= 0 && i < 4 && i < multiGraphHeaderTail.count && (Int(multiGraphHeaderTail[i]) ?? 0) != 0
+    }
+
+    public mutating func setAxisLinked(_ i: Int, _ on: Bool) {
+        guard i >= 0 && i < 4 else { return }
+        while multiGraphHeaderTail.count < 5 { multiGraphHeaderTail.append(multiGraphHeaderTail.count == 4 ? "100" : "0") }
+        multiGraphHeaderTail[i] = on ? "1" : "0"
+    }
 
     public init() {}
 
@@ -486,4 +604,13 @@ public struct SMPProject: Hashable, Sendable {
     public func dataFile(named name: String) -> DataFile? { dataFiles[SMPProject.key(name)] }
 
     public mutating func setDataFile(_ file: DataFile) { dataFiles[SMPProject.key(file.name)] = file }
+}
+
+
+/// 読んだときの行と、読んだ直後にこのアプリが書く形の行。中身の比べ(==)には入れない
+struct SourceText: Hashable, Sendable {
+    var lines: [String]? = nil
+    var normalized: [String]? = nil
+    static func == (a: SourceText, b: SourceText) -> Bool { true }
+    func hash(into h: inout Hasher) {}
 }

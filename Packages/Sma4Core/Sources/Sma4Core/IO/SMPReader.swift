@@ -92,6 +92,8 @@ public enum SMPReader {
             let header = fields(cursor.next())
             let count = max(int(header, 0, 0), 0)
             project.multiGraphHeaderTail = Array(header.dropFirst())
+            // 「他のグラフとリンク」は開くといつも外れている
+            for i in 0..<4 where i < project.multiGraphHeaderTail.count { project.multiGraphHeaderTail[i] = "0" }
             for _ in 0..<count {
                 cursor.skipBlank()
                 guard let nameLine = cursor.peek(), nameLine.hasPrefix("[") else { break }
@@ -124,6 +126,64 @@ public enum SMPReader {
     // MARK: - グラフ 1 枚
 
     static func readGraph(_ c: inout LineCursor) throws -> Graph {
+        let start = c.index
+        var g = try readGraphBody(&c)
+        // 1.8 形式なら、読んだ行を覚えておく(書き戻すとき、変えていない値は元の文字のまま書く)
+        if parseVersion(g.versionLine) >= 1.8 {
+            let raw = Array(c.lines[start..<c.index])
+            let norm = SMPWriter.graphLines(g)
+            if raw.count == norm.count {
+                g.source = SourceText(lines: raw, normalized: norm)
+            }
+        }
+        // 元の行を覚えたあとに直すので、保存すると直した値が書かれる
+        normalizeCurveRanges(&g)
+        normalizeSeriesOnLoad(&g)
+        return g
+    }
+
+    /// 開くときに直す値:
+    /// - 一般関数の最小二乗の次数は 8、任意関数の読み込み行数は分割数
+    /// - U・R 軸を X・Y 軸と共通にしていれば、From・To・目盛の間隔・副目盛の分割数・目盛の付け方・自動・主目盛・副目盛を写す
+    ///   (フォント・数字の書き方・軸の線の範囲などは写さない)
+    /// - 枠の 11 個目(線のピッチ)が 200 を超えていれば 20
+    /// - 軸の線の範囲(始め・終わり)は、始めが終わりより大きければ入れ替える
+    /// - 方眼のグラフでは、U・R 軸の主目盛・副目盛の「内側」を外す(外側はそのまま。共通の軸を写したあとに外す)
+    static func normalizeSeriesOnLoad(_ g: inout Graph) {
+        for i in g.series.indices {
+            switch g.series[i].kind {
+            case .generalLSQ: g.series[i].lsqOrder = 8
+            case .function: g.series[i].linesRead = g.series[i].curveDivisions
+            default: break
+            }
+        }
+        GraphOps.syncCommonAxes(&g)
+        for i in g.axes.indices where g.axes[i].limitStart > g.axes[i].limitEnd {
+            (g.axes[i].limitStart, g.axes[i].limitEnd) = (g.axes[i].limitEnd, g.axes[i].limitStart)
+        }
+        if g.frameType == .grid {
+            for i in [2, 3] where i < g.axes.count {
+                g.axes[i].major.inside = false
+                g.axes[i].minor.inside = false
+            }
+        }
+        for i in g.objects.indices {
+            if case .shape(var s) = g.objects[i].object, s.objectType == ShapeObject.Kind.box.rawValue, s.pitch > 200 {
+                s.pitch = 20
+                g.objects[i].object = .shape(s)
+            }
+        }
+    }
+
+    /// 曲線(最小二乗・スプライン・任意関数)の範囲で、終わりが始めより大きくなければ終わりを始め + 1 にする。
+    /// (0,0)→(0,1)、(2,2)→(2,3)、(4,2)→(4,5)、(-1,-1)→(-1,0)。ふつうのデータの系列は直さない
+    static func normalizeCurveRanges(_ g: inout Graph) {
+        for i in g.series.indices where g.series[i].kind.hasCurve && !(g.series[i].curveEnd > g.series[i].curveStart) {
+            g.series[i].curveEnd = g.series[i].curveStart + 1
+        }
+    }
+
+    static func readGraphBody(_ c: inout LineCursor) throws -> Graph {
         var g = Graph()
         let versionLine = c.next()
         g.versionLine = versionLine
@@ -185,8 +245,43 @@ public enum SMPReader {
 
     static func finalize(_ g: Graph, version: Double) -> Graph {
         var g = g
-        if version < 1.5 {
-            // 古い SMP のフォントは pt で書かれている。pointSize が自動で判断するのでそのまま。
+        if version < 1.4 {
+            // 1.3 以前の軸の行の 4〜6 個目は読まず、「範囲を限らない・0〜10000」にする
+            for i in g.axes.indices {
+                g.axes[i].limitRange = false
+                g.axes[i].limitStart = 0
+                g.axes[i].limitEnd = 10000
+            }
+        }
+        if version < 1.6 {
+            // 1.5 以前(16bit 形式を含む)のフォントの高さは pt で書かれているので ×100 にする
+            func up(_ f: inout LogFont) {
+                f.height *= 100
+                f.width *= 100
+            }
+            for i in g.axes.indices { up(&g.axes[i].font) }
+            up(&g.othersFont)
+            for i in g.objects.indices {
+                if case .text(var t) = g.objects[i].object {
+                    up(&t.latinFont); up(&t.japaneseFont)
+                    // 古い文字には記号のフォントが無いので、[OTHERS] のフォントを使う
+                    t.symbolFont = g.othersFont
+                    g.objects[i].object = .text(t)
+                }
+            }
+            // 矢印・枠・図([ARROW] の順)、点、文字の順に並べる
+            func rank(_ o: GraphObject) -> Int {
+                switch o {
+                case .shape, .picture: return 0
+                case .dot: return 1
+                case .text: return 2
+                default: return 3
+                }
+            }
+            g.objects = g.objects.enumerated().sorted { (a, b) in
+                let ra = rank(a.element.object), rb = rank(b.element.object)
+                return ra != rb ? ra < rb : a.offset < b.offset
+            }.map(\.element)
         }
         if g.page.paperWidth <= 0 { g.page = PageSetup() }
         return g
@@ -228,7 +323,7 @@ public enum SMPReader {
         s.tabAsSpace = bool(f2, 3)
         s.absoluteLineCount = bool(f2, 4)
         s.skipCommentCount = bool(f2, 5)
-        s.considerOutOfRange = bool(f2, 6)
+        s.considerOutOfRangeValue = int(f2, 6, 0)
 
         // 3 行目: 線種 ドット種 プロットサイズ ドット色
         let f3 = fields(c.next())
@@ -276,25 +371,60 @@ public enum SMPReader {
         s.curveWidth = int(f9, 1, 40)
         s.curveColor = SMPColor(colorref: int(f9, 2, 0))
         s.curvePitch = int(f9, 3, 300)
-        s.curveVisible = f9.count > 4 ? bool(f9, 4, true) : true
+        s.visible = f9.count > 4 ? bool(f9, 4, true) : true
+        // 古いファイルには範囲の外の数(線種 -28034 など)がある。そのまま書き戻せるように覚えておく
+        if f9.count >= 4, Array(f9.prefix(4)) != SMPWriter.curveStyleFields(s).split(separator: " ").map(String.init) {
+            s.curveStyleRaw = Array(f9.prefix(4))
+        }
 
         if s.kind == .generalLSQ {
-            s.generalParameterLine = c.peek().map { $0.hasPrefix("[") ? "" : c.next() } ?? ""
-            // 新しい形式の行の 1 つ目の値は許容誤差(%)らしい。% として無理のない値のときだけ使う
-            if let t = SeriesEvaluator.parameterLineTolerance(s.generalParameterLine), t.isFinite, t > 0, t <= 10 {
-                s.generalTolerance = t
+            let rawParams = c.peek().map { $0.hasPrefix("[") ? "" : c.next() } ?? ""
+            // 初期値の行は "個数 許容誤差 a b …"。古い "7 …" は "9 …" にする
+            let pv = fields(rawParams).compactMap { Double($0) }
+            if let n = pv.first, Int(n) != 9, pv.count >= 2 {
+                var vals = Array(pv.dropFirst())
+                while vals.count < 10 { vals.append(0) }
+                s.generalParameterLine = "9 " + vals.prefix(10).map(SMPWriter.e).joined(separator: " ")
+                s.lsqOrder = 8
+            } else {
+                s.generalParameterLine = rawParams
             }
+            let pf = fields(s.generalParameterLine).compactMap { Double($0) }
+            if pf.count >= 2, pf[1].isFinite, pf[1] > 0 { s.generalTolerance = pf[1] }
             if let l = c.peek(), !l.hasPrefix("[") { s.generalFunction = c.next().trimmingCharacters(in: .whitespaces) }
+            // 偏微分: 新しい形式は "動かすか|式" が 9 行、古い形式は式だけが 7 行
+            let newForm = c.peek().map { $0.range(of: #"^\s*-?\d+\|"#, options: .regularExpression) != nil } ?? false
             var ders: [String] = []
-            for _ in 0..<7 {
+            var fixed: Set<String> = []
+            for k in 0..<(newForm ? 9 : 7) {
                 guard let l = c.peek(), !l.hasPrefix("[") else { break }
-                ders.append(c.next().trimmingCharacters(in: .whitespaces))
+                let line = c.next()
+                if newForm, let bar = line.firstIndex(of: "|") {
+                    let flag = Int(line[..<bar].trimmingCharacters(in: .whitespaces)) ?? 1
+                    if flag == 0 { fixed.insert(Series.generalParameterNames[k]) }
+                    ders.append(String(line[line.index(after: bar)...]).trimmingCharacters(in: .whitespaces))
+                } else {
+                    ders.append(line.trimmingCharacters(in: .whitespaces))
+                }
             }
-            while ders.count < 7 { ders.append("") }
+            while ders.count < 9 { ders.append("") }
             s.generalDerivatives = ders
+            s.generalFixed = fixed
         }
         var rest = c.takeUntilSection().filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-        if s.kind == .extension1, let ex = parseExtensionBlock(rest) {
+        // 特殊処理(種類 8・9): 解析の名前は 1 行目の 10 個目。9 行目の次は「行の数」とその数の行
+        if s.kind == .extension1 || s.kind == .extension2,
+           let a = ExtensionAnalysis(rawValue: s.option.trimmingCharacters(in: .whitespaces)) {
+            let kindRaw = s.kindRaw
+            s.extensionAnalysis = a
+            s.kind = Series.Kind(rawValue: kindRaw) ?? a.seriesKind
+            s.kindRaw = kindRaw
+            if let ex = parseExtensionBlock(rest, analysis: a) {
+                if let settings = ex.settings { s.peakFit = settings }
+                rest.removeFirst(ex.consumed)
+            }
+        } else if s.kind == .extension1, let ex = parseLegacyExtensionBlock(rest) {
+            // Sma4 for Mac 2.2.1 までが書いた形(名前の行から始まる)
             s.extensionAnalysis = ex.analysis
             if let settings = ex.settings { s.peakFit = settings }
             rest.removeFirst(ex.consumed)
@@ -303,11 +433,9 @@ public enum SMPReader {
         return s
     }
 
-    /// 特殊処理(種類 8)の系列の 9 行の後ろの行(SMPWriter.extensionLines の形):
-    /// 1 行目は解析の名前(GAUSSF2 など)、2 行目は「ピーク数 Offsetを動かす Offset 精度」、
-    /// 3〜8 行目はピーク 1〜6 の「強度 位置 半値幅 強度を動かす 位置を動かす 幅を動かす」。
-    /// 2 行目以降が無い・形が違うときは名前だけを読む。
-    static func parseExtensionBlock(_ lines: [String]) -> (analysis: ExtensionAnalysis, settings: PeakFitSettings?, consumed: Int)? {
+    /// Sma4 for Mac 2.2.1 までが書いた特殊処理の行: 解析の名前、「ピーク数 Offsetを動かす Offset 精度」、
+    /// ピーク 1〜6 の「強度 位置 半値幅 強度を動かす 位置を動かす 幅を動かす」
+    static func parseLegacyExtensionBlock(_ lines: [String]) -> (analysis: ExtensionAnalysis, settings: PeakFitSettings?, consumed: Int)? {
         guard let first = lines.first,
               let analysis = ExtensionAnalysis(rawValue: first.trimmingCharacters(in: .whitespaces)) else { return nil }
         func numeric(_ line: String, _ count: Int) -> [String]? {
@@ -335,6 +463,32 @@ public enum SMPReader {
             s.varyWidth[k] = bool(f, 5, true)
         }
         return (analysis, s, 2 + n)
+    }
+
+    /// 特殊処理(種類 8・9)の系列の 9 行目の後ろ(SMPWriter.extensionLines と同じ形):
+    /// 1 行目は後ろに続く行の数。Gaussian・Lorentzian は 2 + ピーク数で、精度(%f)、「Offset を動かすか Offset(%f)」、
+    /// ピークごとに「強度を動かすか 強度 位置を動かすか 位置 幅を動かすか 半値幅」(%g)。ほかの解析は 0。
+    /// 形が違えば nil(行はそのまま残す)
+    static func parseExtensionBlock(_ lines: [String], analysis: ExtensionAnalysis) -> (settings: PeakFitSettings?, consumed: Int)? {
+        guard let first = lines.first, let n = Int(first.trimmingCharacters(in: .whitespaces)), n >= 0, lines.count >= 1 + n else { return nil }
+        guard analysis.usesFittingDialog, n >= 3 else { return (nil, 1 + n) }
+        var s = PeakFitSettings()
+        guard let precision = Double(lines[1].trimmingCharacters(in: .whitespaces)) else { return nil }
+        s.precision = precision
+        let off = fields(lines[2])
+        guard off.count >= 2, let ov = Double(off[1]) else { return nil }
+        s.varyOffset = bool(off, 0, false)
+        s.offset = ov
+        let peaks = Swift.min(n - 2, PeakFitSettings.maxPeaks)
+        for k in 0..<peaks {
+            let f = fields(lines[3 + k])
+            guard f.count >= 6, f.prefix(6).allSatisfy({ Double($0) != nil }) else { return nil }
+            s.varyIntensity[k] = bool(f, 0, true); s.intensity[k] = dbl(f, 1, 1)
+            s.varyPosition[k] = bool(f, 2, true); s.position[k] = dbl(f, 3, 1)
+            s.varyWidth[k] = bool(f, 4, true); s.width[k] = dbl(f, 5, 1)
+        }
+        s.count = Swift.max(peaks, 1)
+        return (s, 1 + n)
     }
 
     static func readGraphSection(_ c: inout LineCursor, into g: inout Graph) {
@@ -405,7 +559,9 @@ public enum SMPReader {
         a.font = LogFont.parse(fields: fields(fontLine), faceName: fontName.isEmpty ? "Times New Roman" : fontName)
         if let l = c.peek(), !l.hasPrefix("[") { a.major = readTick(c.next()) }
         if let l = c.peek(), !l.hasPrefix("["), !l.trimmingCharacters(in: .whitespaces).isEmpty { a.minor = readTick(c.next()) }
-        _ = c.takeUntilSection()
+        // 副目盛の行の次の行は目盛変換の式(使わないときは空行)
+        let rest = c.takeUntilSection()
+        a.transformExpression = rest.first?.trimmingCharacters(in: .whitespaces) ?? ""
         return a
     }
 
@@ -433,8 +589,10 @@ public enum SMPReader {
         t.y = int(pf, 1, 0)
         t.color = SMPColor(colorref: int(pf, 2, 0))
         t.backgroundMode = int(pf, 3, 1)
-        t.absolutePosition = bool(pf, 4)
-        t.positionTail = Array(pf.dropFirst(5))
+        // 5 つ目は揃え、6 つ目は絶対位置
+        t.alignment = int(pf, 4, 0)
+        t.absolutePosition = bool(pf, 5)
+        t.positionTail = Array(pf.dropFirst(6))
         t.text = c.next()
         readFonts(&c, into: &t)
         return t
@@ -559,6 +717,14 @@ public enum SMPReader {
             guard let l = c.peek(), !l.hasPrefix("[") else { break }
             let f = fields(l)
             let type = f.count > 9 ? int(f, 9, 0) : 0
+            if type == PictureObject.objectType {
+                // 図: 13 個の値のあとがファイル名(16bit 形式。大きさは 0 0 0 0 として読む)
+                _ = c.next()
+                let shape = readShape(f.prefix(13).joined(separator: " "), objectType: type)
+                let path = f.dropFirst(13).joined(separator: " ")
+                g.objects.append(ObjectItem(.picture(PictureObject(path: path, info: [0, 0, 0, 0], shape: shape))))
+                continue
+            }
             g.objects.append(ObjectItem(.shape(readShape(c.next(), objectType: type))))
         }
         _ = c.takeUntilSection()
@@ -574,7 +740,7 @@ public enum SMPReader {
         _ = c.takeUntilSection()
     }
 
-    /// [MASKS]: 数の行、マスクごとに "系列番号 xMin xMax yMin yMax"、そのあとにいつも書かれる "0" と "0"
+    /// [MASKS]: 数の行、マスクごとに "対象 xMin xMax yMin yMax"(対象は 0 = すべての系列、k = k 番目の系列)、そのあとにいつも書かれる "0" と "0"
     static func readMasks(_ c: inout LineCursor, into g: inout Graph) {
         let count = Swift.max(int(fields(c.next()), 0, 0), 0)
         var masks: [DataMask] = []
@@ -583,7 +749,7 @@ public enum SMPReader {
             let f = fields(l)
             guard f.count >= 5, f.prefix(5).allSatisfy({ Double($0) != nil }) else { break }
             c.index += 1
-            masks.append(DataMask(seriesIndex: int(f, 0, 0), xMin: dbl(f, 1), xMax: dbl(f, 2), yMin: dbl(f, 3), yMax: dbl(f, 4)))
+            masks.append(DataMask(target: int(f, 0, 0), xMin: dbl(f, 1), xMax: dbl(f, 2), yMin: dbl(f, 3), yMax: dbl(f, 4)))
         }
         g.masks = masks
         var rest = c.takeUntilSection()
@@ -592,7 +758,7 @@ public enum SMPReader {
     }
 
     static func readOthers(_ c: inout LineCursor, into g: inout Graph) {
-        _ = c.next() // " 2"
+        if let l = c.peek(), !l.hasPrefix("[") { g.othersCountLine = c.next() }
         if let l = c.peek(), !l.hasPrefix("[") {
             let f = fields(c.next())
             var consts = f.compactMap { Double($0) }
@@ -604,7 +770,14 @@ public enum SMPReader {
             let name = c.next().trimmingCharacters(in: .whitespaces)
             g.othersFont = LogFont.parse(fields: ff, faceName: name.isEmpty ? "Symbol" : name)
         }
-        _ = c.takeUntilSection()
+        // フォント名のあとの行(SMP の場所など)と空の行は、そのまま書き戻す
+        var tail = c.takeUntilSection()
+        // 古い形式で [OTHERS] が最後の節のとき、ファイルの終わりの改行のあとにできる空の行は数えない(書くときの空の行は 1 つ)
+        if c.atEnd, tail.count >= 2, tail[tail.count - 1].trimmingCharacters(in: .whitespaces).isEmpty,
+           tail[tail.count - 2].trimmingCharacters(in: .whitespaces).isEmpty {
+            tail.removeLast()
+        }
+        g.othersTailLines = tail.isEmpty ? [""] : tail
     }
 
     // MARK: - [DATA]
@@ -630,9 +803,12 @@ public enum SMPReader {
                 }
                 dataLines.append(line)
             }
-            // 時刻だけを残す(ファイルの大きさの 16 進は書き出すときに付け直す)
             let ts = timestampPart(rest)
-            p.setDataFile(DataFile(name: name, timestamp: ts, lines: dataLines))
+            var file = DataFile(name: name, timestamp: ts, lines: dataLines)
+            // 見出しの "]" より後ろは、変えていなければそのまま書き戻す
+            file.headerTail = String(raw[raw.index(after: raw.firstIndex(of: "]")!)...])
+            file.headerTailBasis = (ts, dataLines)
+            p.setDataFile(file)
         }
     }
 

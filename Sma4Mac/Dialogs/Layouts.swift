@@ -465,6 +465,11 @@ extension DlgTemplate {
         d.buttons(left: [(768, "すべて選ぶ"), (767, "新しく…")], right: [(IDC.cancel, "キャンセル"), (IDC.ok, "選ぶ")])
     }
 
+    static let maskTarget = DlgLayout.dialog("マスクをかけるデータ", width: 240) { d in
+        d.list(561, h: 90, owner: true)
+        d.buttons(left: [(767, "All")], right: [(IDC.cancel, "キャンセル"), (IDC.ok, "選ぶ")])
+    }
+
     static let chooseOne = DlgLayout.dialog("ファイルを選ぶ", width: 240) { d in
         d.list(561, h: 90, owner: true)
         d.buttons(left: [(767, "新しく…")], right: [(IDC.cancel, "キャンセル"), (IDC.ok, "選ぶ")])
@@ -477,7 +482,7 @@ extension DlgTemplate {
     }
 
     static let maskChoice = DlgLayout.dialog("データマスク", width: 280) { d in
-        d.note("データ: X の範囲, Y の範囲")
+        d.note("対象: Xmin Xmax, Ymin Ymax(All はすべてのデータ)")
         d.list(561, h: 70)
         d.buttons(left: [(767, "新しく…")], right: [(IDC.cancel, "キャンセル"), (IDC.ok, "削除")])
     }

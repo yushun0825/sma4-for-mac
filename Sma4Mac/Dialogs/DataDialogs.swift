@@ -177,8 +177,9 @@ enum DataDialogs {
 
         sheet.validate = {
             let s = read(s0)
-            for (on, text) in [(s.transformX, s.expressionX), (s.transformY, s.expressionY)] where on {
-                do { _ = try Expression(text) } catch {
+            // 先頭の「x=」「y=」は計算のときに除く(SMP の任意関数と同じ書き方を受け付ける)
+            for (on, text, v) in [(s.transformX, s.expressionX, "x"), (s.transformY, s.expressionY, "y")] where on {
+                do { _ = try Expression(Expression.body(text, assigning: v)) } catch {
                     MessageBox.show("数式が正しくありません: \(text)\n\((error as? ExpressionError)?.message ?? "")", style: .warning)
                     return false
                 }
@@ -286,11 +287,12 @@ enum DataDialogs {
 
     enum MaskChoice { case new, delete(Int) }
 
-    static func maskChoice(masks: [DataMask], names: [String], over window: NSWindow?) -> MaskChoice? {
+    /// 一覧の 1 行は "対象: xMin xMax, yMin yMax"。対象は All(すべての系列)か系列の番号(1 から)
+    static func maskChoice(masks: [DataMask], over window: NSWindow?) -> MaskChoice? {
         let dlg = Dialog(.maskChoice)
         let p = dlg.page
         let items = masks.map { m -> String in
-            let n = m.seriesIndex < names.count ? names[m.seriesIndex] : "?"
+            let n = m.target == DataMask.allSeries ? "All" : String(format: "%3d", m.target)
             return String(format: "%@: %10g %10g, %10g %10g", n, m.xMin, m.xMax, m.yMin, m.yMax)
         }
         p.list(561)?.items = items
@@ -419,6 +421,7 @@ enum SeriesSample {
             ctx.setLineWidth(max(pt(s.lineWidth), 0.5))
             let d = GraphRenderer.dash(s.lineType.rawValue, pitch: s.pitch, width: s.lineWidth).map { CGFloat($0) / 100 * CanvasView.pointsPerMM }
             ctx.setLineDash(phase: 0, lengths: d)
+            ctx.setLineCap(d.isEmpty ? .butt : .round)
             ctx.move(to: CGPoint(x: x0, y: y)); ctx.addLine(to: CGPoint(x: x1, y: y))
             ctx.strokePath()
             ctx.setLineDash(phase: 0, lengths: [])
@@ -486,6 +489,22 @@ enum ListDialogs {
         let r = dlg.run(over: window)
         guard r == IDC.ok else { return nil }
         return p.list(561)?.selectedIndexes ?? []
+    }
+
+    enum MaskTarget { case all, series(Int) }
+
+    /// マスクをかけるデータを 1 つ選ぶ。All を押すとすべての系列
+    static func chooseMaskTarget(items: [String], over window: NSWindow?) -> MaskTarget? {
+        let dlg = Dialog(.maskTarget)
+        let p = dlg.page
+        p.list(561)?.items = items
+        p.list(561)?.selectedIndexes = items.isEmpty ? [] : [0]
+        p.list(561)?.onDoubleClick = { _ in dlg.end(IDC.ok) }
+        dlg.buttons[767] = { true }
+        let r = dlg.run(over: window)
+        if r == 767 { return .all }
+        guard r == IDC.ok, let i = p.list(561)?.selectedIndexes.first else { return nil }
+        return .series(i)
     }
 
     /// 1 行の入力(MY_INPUTDIALOG)
